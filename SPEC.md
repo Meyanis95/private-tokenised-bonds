@@ -151,7 +151,7 @@ Privacy: Observer sees the nullifier but cannot determine which note it correspo
 
 Frontrunning: Traders submit proofs to Issuer via private channel. Issuer controls on-chain ordering, preventing frontrunning by other participants. (Assumes Issuer is regulated and accountable.)
 
-## 7. Circuit Constraints
+## Circuit Constraints
 
 The ZK circuit proves (zero-knowledge):
 
@@ -178,7 +178,7 @@ Private Inputs:
 
 > Note: `JoinSplit` has been chosen for simplest implementation, but for a more efficient protocol we should include either a dynamic size or single note circuit.
 
-## 8. Security Model
+## Security Model
 
 **Trust Assumptions**:
 
@@ -199,7 +199,7 @@ Private Inputs:
 - Atomic Swap Integrity: Relayer can execute mismatched proofs (wrong assets traded) ❌
   - Mitigation: Both proofs must include a shared intent commitment binding them to the same pair of nullifiers and assets, verified in both constraints
 
-## 9. Terminology
+## Terminology
 
 - **Note**: Private asset represented by a commitment (value, salt, owner, assetId, maturityDate)
 - **Commitment**: Hash of a note: `Poseidon(value, salt, owner, assetId, maturityDate)`
