@@ -16,21 +16,21 @@ This is a proof-of-concept implementation of a privacy-preserving bond protocol.
 
 ## Repository Structure
 
-### `/circuits`
+#### `/circuits`
 
 Noir ZK circuits implementing the core proving system.
 
 - `src/main.nr` — JoinSplit circuit (2-input, 2-output)
 - Proves: ownership, merkle membership, balance conservation, maturity constraints
 
-### `/contracts`
+#### `/contracts`
 
 Solidity smart contracts for on-chain settlement.
 
 - `src/PrivateBond.sol` — Main contract with `mint`, `atomicSwap`, and `burn` functions
 - `src/Verifier.sol` — HONK proof verifier (generated)
 
-### `/wallet`
+#### `/wallet`
 
 Rust CLI emulating the full user flow.
 
@@ -39,7 +39,7 @@ Rust CLI emulating the full user flow.
 - Redeem at maturity (burn)
 - Query bond state and merkle proofs
 
-### `/SPEC.md`
+#### `/SPEC.md`
 
 Full specification covering cryptography, protocol flow, security assumptions, and privacy analysis.
 
@@ -53,11 +53,11 @@ Full specification covering cryptography, protocol flow, security assumptions, a
 - `maturityDate`: maturity date of the bond
 - `assetId`: ID of the asset of the note
 
-### Note Commitment
+#### Note Commitment
 
 `Commitment = Hash(value, salt, owner, assetId, maturityDate)`
 
-### Note storage
+#### Note storage
 
 All commitments are stored in a merkle tree on-chain. Proves membership without revealing which specific commitments you own.
 
@@ -66,7 +66,7 @@ All commitments are stored in a merkle tree on-chain. Proves membership without 
 `Nullifier = Hash(salt, private_key)`
 When you spend a note, you publish its nullifier to prevent double-spending. No one can link the nullifier back to the note.
 
-### Transactions
+#### Transactions
 
 - **Onboarding**: User creates a note and commits it to the merkle tree
 - **Trading**: User combines 2 notes (100 + 60) into 2 new ones (60 + 40), proving balance conservation
