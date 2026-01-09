@@ -1,6 +1,6 @@
 # Private Institutional Bond: Protocol Specification
 
-## 1. Identity & Access Model
+## Identity & Access Model
 
 Users maintain two identity layers:
 
@@ -22,7 +22,7 @@ The Shielded Identity enables proof generation and memo encryption without revea
 
 **Access Control**: Contract maintains whitelist `mapping(address => whitelisted)`. Only whitelisted ECDSA addresses can submit proofs.
 
-## 2. Primary Market: Issuance
+## Primary Market: Issuance
 
 Issuer creates a single Global Note representing the entire bond tranche. This note exists in the shielded pool and is distributed on-demand via standard JoinSplit transactions:
 
@@ -35,7 +35,7 @@ Issuer creates a single Global Note representing the entire bond tranche. This n
 
 Each transaction atomically adds new note commitments to the Merkle tree.
 
-## 3. Secondary Market: Trading
+## Secondary Market: Trading
 
 Traders interact via Issuer as relayer:
 
@@ -58,7 +58,7 @@ nonce = HKDF-SHA256(shared_secret, "", alice || bob || "nonce", 12)
 ciphertext = AES-256-GCM(aes_key, nonce, {value, salt, owner, assetId})
 ```
 
-## 4. Redemption & Maturity
+## Redemption & Maturity
 
 This protocol supports **zero-coupon bonds** with a single maturity event.
 
@@ -85,11 +85,10 @@ Commitment = Poseidon(value, salt, owner, assetId, maturityDate)
 1. Bondholder (Alice) monitors bond maturity date
 2. After maturity, Alice generates ZK proof B (Burn Proof):
    - **Input**: Bond note(s) to redeem
-   - **Output**: Empty (or change note if partial redemption)
+   - **Output**: Bond notes with `value = 0`
    - **Proves**:
      - Ownership of bond note (knows privKey)
      - Existence in current Merkle tree
-     - maturityDate <= block.timestamp (or issuer verifies)
 3. Alice submits Burn Proof + intent to Issuer via secure channel
 4. Issuer verifies:
    - Proof is cryptographically valid
@@ -104,27 +103,9 @@ Commitment = Poseidon(value, salt, owner, assetId, maturityDate)
    - Settlement via traditional banking channels (SWIFT, settlement system)
    - Issuer publishes redemption schedule only to involved parties
 
-### Restrictions Before Maturity
-
-- **Trading Only**: Before maturity, bonds can only be traded P2P via secondary market (Section 3)
-- **No Early Redemption**: Redemption proofs rejected before maturityDate
-- **Atomic Enforcement**: Contract enforces both conditions; cannot bypass via proof manipulation
-
-### Nullifier Invalidation
-
-Redemption uses the same nullifier mechanism as trading (Section 5):
-
-```
-nullifier = Poseidon(salt, private_key)
-```
-
-- When Burn Proof is accepted, nullifiers are recorded on-chain
-- Attempting to spend the same note again produces same nullifier → rejected as already spent
-- Prevents double-redemption without explicit "burned" state flag
-
 ### Proof Structure
 
-Redemption reuses the JoinSplit proof structure:
+Redemption reuses the `JoinSplit` proof structure:
 
 - **Inputs**: Bond notes to redeem (1 or more)
 - **Outputs**: Change note (if partial redemption) or empty (if redeeming all)
@@ -133,12 +114,12 @@ Redemption reuses the JoinSplit proof structure:
 
 ### Privacy Properties
 
-- **Amounts private**: Bond values, redemption amounts never visible on-chain
-- **Identities semi-public**: Issuer knows redeemer (via whitelist), but amounts stay hidden
-- **No redemption audit trail on-chain**: Nullifiers published, but cannot be linked to amounts
-- **Settlement private**: Off-chain settlement details not recorded in contract
+- Amounts private: Bond values, redemption amounts never visible on-chain
+- Identities semi-public: Issuer knows redeemer (via whitelist), but amounts stay hidden
+- No redemption audit trail on-chain: Nullifiers published, but cannot be linked to amounts
+- Settlement private: Off-chain settlement details not recorded in contract
 
-## 5. Merkle Tree
+## Merkle Tree
 
 Binary tree, height 16, Poseidon hashing over BN254.
 
@@ -156,7 +137,7 @@ On-chain state:
 Traders maintain local copies, compute Merkle paths locally. Issuer may provide pre-computed paths.
 For a production use an incremental merkle tree should be prefered for scalability, as we're re-computing the root in the smart contract, reaching a certain level will break the gas limit.
 
-## 6. Nullifiers: Replay Protection
+## Nullifiers: Replay Protection
 
 Each spent note generates a nullifier:
 
@@ -166,9 +147,9 @@ nullifier = Poseidon(salt, private_key)
 
 On-chain, the contract records spent nullifiers. Attempting to spend the same note again computes the same nullifier, which is rejected as already spent.
 
-**Privacy**: Observer sees the nullifier but cannot determine which note it corresponds to (salt and private_key are secret). Nullifiers from different notes are cryptographically distinct.
+Privacy: Observer sees the nullifier but cannot determine which note it corresponds to (salt and private_key are secret). Nullifiers from different notes are cryptographically distinct.
 
-**Frontrunning**: Traders submit proofs to Issuer via private channel. Issuer controls on-chain ordering, preventing frontrunning by other participants. (Assumes Issuer is regulated and accountable.)
+Frontrunning: Traders submit proofs to Issuer via private channel. Issuer controls on-chain ordering, preventing frontrunning by other participants. (Assumes Issuer is regulated and accountable.)
 
 ## 7. Circuit Constraints
 
@@ -181,11 +162,21 @@ The ZK circuit proves (zero-knowledge):
 5. **Consistency**: All notes use the same asset ID
 6. **Commitment Correctness**: Output commitments hash correctly from (value, salt, owner, assetId)
 
-**Public Inputs**: merkleRoot, nullifiers[], commitments_out[] (verified by contract)
+Public Inputs:
 
-**Private Inputs**: note values/salts/owners, private_key, Merkle paths
+- `merkleRoot`
+- `nullifiers[]`
+- `commitments_out[]`
 
-Note: JoinSplit has been chosen for simplest implementation, but for a more efficient protocol we should include either a dynamic size or single note circuit.
+Private Inputs:
+
+- `in & out notes values`
+- `in & out notes salts`
+- `in & out notes owners`
+- `owner private_key`
+- `Merkle paths & indices`
+
+> Note: `JoinSplit` has been chosen for simplest implementation, but for a more efficient protocol we should include either a dynamic size or single note circuit.
 
 ## 8. Security Model
 
