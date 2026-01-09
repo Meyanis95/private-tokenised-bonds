@@ -1,0 +1,45 @@
+use ff::PrimeField;
+use poseidon_rs::{Fr, Poseidon};
+
+// TODO: Define proper PublicKey and PrivateKey types
+type PublicKey = [u8; 32];
+type PrivateKey = Fr;
+
+pub struct Note<F> {
+    pub value: F,
+    pub salt: F,
+    pub owner_public_key: F,
+    pub asset_id: F,
+}
+
+impl<F: ToString> Note<F> {
+    pub fn commit(&self) -> Fr {
+        let f_val = Fr::from_str(&self.value.to_string()).unwrap();
+
+        // let owner_hex = hex::encode(self.owner_public_key);
+        // let owner_big = BigUint::parse_bytes(owner_hex.as_bytes(), 16).unwrap();
+        let f_owner = Fr::from_str(&self.owner_public_key.to_string()).unwrap();
+
+        // let salt_hex = hex::encode(self.salt);
+        // let salt_big = BigUint::parse_bytes(self.salt, 16).unwrap();
+        let f_salt = Fr::from_str(&self.salt.to_string()).expect("Salt too large for field?");
+
+        let f_asset = Fr::from_str(&self.asset_id.to_string()).unwrap();
+
+        let hasher = Poseidon::new();
+        hasher.hash(vec![f_val, f_salt, f_owner, f_asset]).unwrap()
+    }
+
+    pub fn nullifer(&self, private_key: PrivateKey) -> Fr {
+        // let owner_hex = hex::encode(private_key);
+        // let owner_big = BigUint::parse_bytes(owner_hex.as_bytes(), 16).unwrap();
+        // let f_owner = Fr::from_str(&owner_big.to_string()).unwrap();
+
+        // let salt_hex = hex::encode(self.salt);
+        // let salt_big = BigUint::parse_bytes(salt_hex.as_bytes(), 16).unwrap();
+        let f_salt = Fr::from_str(&self.salt.to_string()).expect("Salt too large for field?");
+
+        let hasher = Poseidon::new();
+        hasher.hash(vec![f_salt, private_key]).unwrap()
+    }
+}

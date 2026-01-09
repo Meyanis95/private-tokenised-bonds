@@ -1,0 +1,223 @@
+# Private Institutional Bond: Protocol Specification
+
+## 1. Identity & Access Model
+
+Users maintain two identity layers:
+
+**Transport Identity**: Standard Ethereum address (ECDSA). Visible on-chain. Used for gas payment and contract authorization.
+
+**Shielded Identity**: Privacy keypair derived from a user-generated 256-bit seed. Never published on-chain. From the seed, two keypairs are derived deterministically:
+
+```
+ZK Signing Keypair (EdDSA/BN254):
+  privKey_zk = hash(seed || "zk_signing")
+  pubKey_zk = Poseidon(privKey_zk)
+
+Encryption Keypair (X25519):
+  privKey_x25519 = hash(seed || "x25519_encryption")[0:32]
+  pubKey_x25519 = DH_derive(privKey_x25519)
+```
+
+The Shielded Identity enables proof generation and memo encryption without revealing the controlling Ethereum address.
+
+**Access Control**: Contract maintains whitelist `mapping(address => whitelisted)`. Only whitelisted ECDSA addresses can submit proofs.
+
+## 2. Primary Market: Issuance
+
+Issuer creates a single Global Note representing the entire bond tranche. This note exists in the shielded pool and is distributed on-demand via standard JoinSplit transactions:
+
+1. Issuer generates ZK proof minting Global Note (e.g., $100M) to their Shielded Key
+2. Merkle tree grows by 1 leaf
+3. On distribution: Issuer splits the Global Note into investor notes
+   - Input: Global Note ($100M)
+   - Output 1: Investor A Note ($10M)
+   - Output 2: Issuer Change Note ($90M)
+
+Each transaction atomically adds new note commitments to the Merkle tree.
+
+## 3. Secondary Market: Trading
+
+Traders interact via Issuer as relayer:
+
+1. Alice and Bob negotiate off-chain, exchange Shielded public keys
+2. Alice creates ZK proof A: spends her bond note, outputs note for Bob
+3. Alice encrypts memo: value, salt, assetId (encrypted with ECDH(privKey_alice, pubKey_bob))
+4. Alice submits proof + memo to Issuer via secure channel
+5. Bob similarly creates proof B + memo, submits to Issuer
+6. Issuer verifies both are whitelisted, decrypts memos for audit
+7. Issuer submits atomicSwap(proofA, proofB, memoA, memoB) as single transaction
+8. Contract verifies both proofs, updates merkle tree, records nullifiers
+9. Bob and Alice decrypt their memos from chain, learn note details
+
+**Memo Encryption**:
+
+```
+shared_secret = X25519(alice_privkey_x25519, bob_pubkey_x25519)
+aes_key = HKDF-SHA256(shared_secret, "", alice || bob, 32)
+nonce = HKDF-SHA256(shared_secret, "", alice || bob || "nonce", 12)
+ciphertext = AES-256-GCM(aes_key, nonce, {value, salt, owner, assetId})
+```
+
+## 4. Redemption & Maturity
+
+This protocol supports **zero-coupon bonds** with a single maturity event.
+
+### Bond Note Structure
+
+Each bond note commitment includes maturity metadata:
+
+```
+Commitment = Poseidon(value, salt, owner, assetId, maturityDate)
+```
+
+- **value**: Principal amount (zero-coupon, no periodic coupons)
+- **maturityDate**: Unix timestamp when bonds become redeemable
+
+### Maturity Enforcement
+
+1. **Contract-Level Gate**: Smart contract only accepts redemption proofs if `block.timestamp >= note.maturityDate`
+2. **Optional Circuit Constraint**: For defense-in-depth, circuit can also verify timestamp, but issuer-gated approach is sufficient
+
+### Redemption Flow
+
+**User Workflow:**
+
+1. Bondholder (Alice) monitors bond maturity date
+2. After maturity, Alice generates ZK proof B (Burn Proof):
+   - **Input**: Bond note(s) to redeem
+   - **Output**: Empty (or change note if partial redemption)
+   - **Proves**:
+     - Ownership of bond note (knows privKey)
+     - Existence in current Merkle tree
+     - maturityDate <= block.timestamp (or issuer verifies)
+3. Alice submits Burn Proof + intent to Issuer via secure channel
+4. Issuer verifies:
+   - Proof is cryptographically valid
+   - Alice is whitelisted
+   - Current timestamp >= note.maturityDate
+5. **Issuer executes on-chain**: Submits burnProof(inputNotes, outputChange) as single transaction
+   - Contract verifies proof
+   - Records nullifiers for spent notes (prevents double-redemption)
+   - Updates Merkle tree with any change output
+6. **Off-chain settlement**: Issuer initiates cash transfer outside protocol
+   - All amounts remain private (only nullifiers visible)
+   - Settlement via traditional banking channels (SWIFT, settlement system)
+   - Issuer publishes redemption schedule only to involved parties
+
+### Restrictions Before Maturity
+
+- **Trading Only**: Before maturity, bonds can only be traded P2P via secondary market (Section 3)
+- **No Early Redemption**: Redemption proofs rejected before maturityDate
+- **Atomic Enforcement**: Contract enforces both conditions; cannot bypass via proof manipulation
+
+### Nullifier Invalidation
+
+Redemption uses the same nullifier mechanism as trading (Section 5):
+
+```
+nullifier = Poseidon(salt, private_key)
+```
+
+- When Burn Proof is accepted, nullifiers are recorded on-chain
+- Attempting to spend the same note again produces same nullifier → rejected as already spent
+- Prevents double-redemption without explicit "burned" state flag
+
+### Proof Structure
+
+Redemption reuses the JoinSplit proof structure:
+
+- **Inputs**: Bond notes to redeem (1 or more)
+- **Outputs**: Change note (if partial redemption) or empty (if redeeming all)
+- **Public Inputs**: merkleRoot, nullifiers[], commitments_out[], maturityDate
+- **Constraints**: Same as trading (ownership, existence, balance, consistency)
+
+### Privacy Properties
+
+- **Amounts private**: Bond values, redemption amounts never visible on-chain
+- **Identities semi-public**: Issuer knows redeemer (via whitelist), but amounts stay hidden
+- **No redemption audit trail on-chain**: Nullifiers published, but cannot be linked to amounts
+- **Settlement private**: Off-chain settlement details not recorded in contract
+
+## 5. Merkle Tree
+
+Binary tree, height 16, Poseidon hashing over BN254.
+
+```
+Leaf:          commit = Poseidon(value, salt, owner, assetId)
+Internal Node: hash(left, right) = Poseidon(left, right)
+```
+
+On-chain state:
+
+- `merkleRoot`: current root hash
+- `commitments[]`: all commitments (enables off-chain tree reconstruction)
+- `nextLeafIndex`: current leaf count
+
+Traders maintain local copies, compute Merkle paths locally. Issuer may provide pre-computed paths.
+For a production use an incremental merkle tree should be prefered for scalability, as we're re-computing the root in the smart contract, reaching a certain level will break the gas limit.
+
+## 6. Nullifiers: Replay Protection
+
+Each spent note generates a nullifier:
+
+```
+nullifier = Poseidon(salt, private_key)
+```
+
+On-chain, the contract records spent nullifiers. Attempting to spend the same note again computes the same nullifier, which is rejected as already spent.
+
+**Privacy**: Observer sees the nullifier but cannot determine which note it corresponds to (salt and private_key are secret). Nullifiers from different notes are cryptographically distinct.
+
+**Frontrunning**: Traders submit proofs to Issuer via private channel. Issuer controls on-chain ordering, preventing frontrunning by other participants. (Assumes Issuer is regulated and accountable.)
+
+## 7. Circuit Constraints
+
+The ZK circuit proves (zero-knowledge):
+
+1. **Ownership**: Prover knows the private_key that generates the computed nullifiers
+2. **Existence**: Each input note commitment exists in the current Merkle tree (verified via path)
+3. **Non-Reuse**: Computed nullifiers have not been published before (enforced by contract)
+4. **Balance**: Sum of input values equals sum of output values
+5. **Consistency**: All notes use the same asset ID
+6. **Commitment Correctness**: Output commitments hash correctly from (value, salt, owner, assetId)
+
+**Public Inputs**: merkleRoot, nullifiers[], commitments_out[] (verified by contract)
+
+**Private Inputs**: note values/salts/owners, private_key, Merkle paths
+
+Note: JoinSplit has been chosen for simplest implementation, but for a more efficient protocol we should include either a dynamic size or single note circuit.
+
+## 8. Security Model
+
+**Trust Assumptions**:
+
+- Issuer is honest, regulated, accountable
+- ZK proofs are sound
+- Poseidon hash is collision-resistant
+- BN254 discrete log is hard
+
+**Threat Model**:
+
+- Replay prevention: Nullifiers prevent re-spending ✅
+- Privacy: Amounts, identities, relationships hidden on-chain ✅
+- Correctness: ZK proofs guarantee balance and membership ✅
+- Issuer censorship: No mitigation (trusted relayer model) ❌
+- Issuer frontrunning: Mitigated by regulation, not cryptography ❌
+- Issuer decryption key: Single point of failure, can expose entire market ❌
+  - Mitigation: Implement per note Viewing Keys or Selective Disclosure
+- Atomic Swap Integrity: Relayer can execute mismatched proofs (wrong assets traded) ❌
+  - Mitigation: Both proofs must include a shared intent commitment binding them to the same pair of nullifiers and assets, verified in both constraints
+
+## 9. Terminology
+
+- **Note**: Private asset represented by a commitment (value, salt, owner, assetId, maturityDate)
+- **Commitment**: Hash of a note: `Poseidon(value, salt, owner, assetId, maturityDate)`
+- **Salt**: Deterministic for better storage, `Poseidon(private_key, note_index)`
+- **Nullifier**: Deterministic identifier for a spent note: `Poseidon(salt, private_key)`
+- **Shielded Key**: User's privacy keypair derived from seed
+- **Merkle Root**: Root hash of the note commitment tree
+- **Proof**: Cryptographic evidence satisfying all constraints without revealing private data
+- **Memo**: Encrypted note details sent on-chain, only recipient can decrypt
+- **Burn Proof**: Redemption proof that spends bond notes without outputs (or with change)
+- **Issuer**: Bond issuer, trusted relayer, and settlement coordinator
+- **Trader**: Investor participant in secondary market trades

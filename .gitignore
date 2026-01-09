@@ -1,0 +1,36 @@
+# Noir (circuits)
+circuits/target/
+circuits/Cargo.lock
+circuits/.noir-artifacts
+
+# Solidity / Foundry (contracts)
+contracts/node_modules/
+contracts/cache/
+contracts/out/
+contracts/broadcast/
+contracts/artifacts/
+contracts/.env
+contracts/.env.local
+contracts/lib
+
+# Rust (wallet)
+wallet/target/
+wallet/Cargo.lock
+wallet/.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Build outputs
+*.o
+*.so
+*.dylib
+*.exe
+
+# Logs
+*.log
