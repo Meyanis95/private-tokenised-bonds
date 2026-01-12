@@ -10,12 +10,12 @@ Users maintain two identity layers:
 
 ```
 ZK Signing Keypair (EdDSA/BN254):
-  privKey_zk = hash(seed || "zk_signing")
-  pubKey_zk = Poseidon(privKey_zk)
+  private_spending_key = hash(seed || "spending_key")
+  public_spending_key = Poseidon(private_spending_key)
 
 Encryption Keypair (X25519):
-  privKey_x25519 = hash(seed || "x25519_encryption")[0:32]
-  pubKey_x25519 = DH_derive(privKey_x25519)
+  private_viewing_key = hash(seed || "x25519_encryption")[0:32]
+  public_viewing_key = DH_derive(private_viewing_key)
 ```
 
 The Shielded Identity enables proof generation and memo encryption without revealing the controlling Ethereum address.

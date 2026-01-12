@@ -1,10 +1,5 @@
 use ff::PrimeField;
 use poseidon_rs::{Fr, Poseidon};
-use std::str::FromStr;
-
-// TODO: Define proper PublicKey and PrivateKey types
-type PublicKey = [u8; 32];
-type PrivateKey = Fr;
 
 pub struct Note {
     pub value: u64,
@@ -32,7 +27,7 @@ impl Note {
             .unwrap()
     }
 
-    pub fn nullifer(&self, private_key: PrivateKey) -> Fr {
+    pub fn nullifer(&self, private_key: Fr) -> Fr {
         let f_salt = Fr::from_str(&self.salt.to_string()).expect("Salt too large for field?");
 
         let hasher = Poseidon::new();

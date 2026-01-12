@@ -1,6 +1,3 @@
-use alloy::primitives::address;
-use alloy::providers::ProviderBuilder;
-use alloy::sol;
 use chrono::Utc;
 use clap::{Parser, Subcommand};
 use ff::Field;
@@ -9,11 +6,12 @@ use serde::{Deserialize, Serialize};
 use std::error::Error;
 use std::fs;
 
-use alloy::rpc::client::RpcClient;
-use alloy::transports::http::Client;
-use alloy::{providers::Provider, signers::local::PrivateKeySigner};
+use alloy::{
+    primitives::address, providers::ProviderBuilder, signers::local::PrivateKeySigner, sol,
+};
 
 mod config;
+mod keys;
 mod merkle;
 mod notes;
 mod prover;
