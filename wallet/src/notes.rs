@@ -6,24 +6,20 @@ use std::str::FromStr;
 type PublicKey = [u8; 32];
 type PrivateKey = Fr;
 
-pub struct Note<F> {
-    pub value: F,
-    pub salt: F,
-    pub owner: F,
-    pub asset_id: F,
-    pub maturity_date: F,
+pub struct Note {
+    pub value: u64,
+    pub salt: u64,
+    pub owner: u64,
+    pub asset_id: u64,
+    pub maturity_date: u64, // Unix timestamp
 }
 
-impl<F: ToString> Note<F> {
+impl Note {
     pub fn commit(&self) -> Fr {
         let f_val = Fr::from_str(&self.value.to_string()).unwrap();
 
-        // let owner_hex = hex::encode(self.owner_public_key);
-        // let owner_big = BigUint::parse_bytes(owner_hex.as_bytes(), 16).unwrap();
         let f_owner = Fr::from_str(&self.owner.to_string()).unwrap();
 
-        // let salt_hex = hex::encode(self.salt);
-        // let salt_big = BigUint::parse_bytes(self.salt, 16).unwrap();
         let f_salt = Fr::from_str(&self.salt.to_string()).expect("Salt too large for field?");
 
         let f_asset = Fr::from_str(&self.asset_id.to_string()).unwrap();
@@ -37,12 +33,6 @@ impl<F: ToString> Note<F> {
     }
 
     pub fn nullifer(&self, private_key: PrivateKey) -> Fr {
-        // let owner_hex = hex::encode(private_key);
-        // let owner_big = BigUint::parse_bytes(owner_hex.as_bytes(), 16).unwrap();
-        // let f_owner = Fr::from_str(&owner_big.to_string()).unwrap();
-
-        // let salt_hex = hex::encode(self.salt);
-        // let salt_big = BigUint::parse_bytes(salt_hex.as_bytes(), 16).unwrap();
         let f_salt = Fr::from_str(&self.salt.to_string()).expect("Salt too large for field?");
 
         let hasher = Poseidon::new();

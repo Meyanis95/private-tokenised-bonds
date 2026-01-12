@@ -1,14 +1,195 @@
+use alloy::primitives::address;
+use alloy::providers::ProviderBuilder;
+use alloy::sol;
 use chrono::Utc;
 use clap::{Parser, Subcommand};
 use ff::Field;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
+use std::error::Error;
 use std::fs;
 
+use alloy::rpc::client::RpcClient;
+use alloy::transports::http::Client;
+use alloy::{providers::Provider, signers::local::PrivateKeySigner};
+
+mod config;
 mod merkle;
 mod notes;
+mod prover;
 
+use config::{PRIVATE_BOND_ADDRESS, RPC_URL};
 use notes::Note;
+
+sol!(
+    #[sol(rpc)]
+    PrivateBond,
+    r#"[
+    {
+      "type": "constructor",
+      "inputs": [
+        { "name": "_verifier", "type": "address", "internalType": "address" },
+        { "name": "initialOwner", "type": "address", "internalType": "address" }
+      ],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "atomicSwap",
+      "inputs": [
+        { "name": "proofA", "type": "bytes", "internalType": "bytes" },
+        {
+          "name": "publicInputsA",
+          "type": "bytes32[]",
+          "internalType": "bytes32[]"
+        },
+        { "name": "proofB", "type": "bytes", "internalType": "bytes" },
+        {
+          "name": "publicInputsB",
+          "type": "bytes32[]",
+          "internalType": "bytes32[]"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "burn",
+      "inputs": [
+        { "name": "proof", "type": "bytes", "internalType": "bytes" },
+        { "name": "root", "type": "bytes32", "internalType": "bytes32" },
+        { "name": "nullifier", "type": "bytes32", "internalType": "bytes32" },
+        {
+          "name": "newCommitment",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        },
+        {
+          "name": "inputMaturityDate",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        },
+        { "name": "isRedeem", "type": "bytes32", "internalType": "bytes32" }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "commitments",
+      "inputs": [{ "name": "", "type": "uint256", "internalType": "uint256" }],
+      "outputs": [{ "name": "", "type": "bytes32", "internalType": "bytes32" }],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "knownRoots",
+      "inputs": [{ "name": "", "type": "bytes32", "internalType": "bytes32" }],
+      "outputs": [{ "name": "", "type": "bool", "internalType": "bool" }],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "mint",
+      "inputs": [
+        { "name": "commitment", "type": "bytes32", "internalType": "bytes32" },
+        { "name": "newRoot", "type": "bytes32", "internalType": "bytes32" }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "mintBatch",
+      "inputs": [
+        {
+          "name": "_commitments",
+          "type": "bytes32[]",
+          "internalType": "bytes32[]"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "nullifiers",
+      "inputs": [{ "name": "", "type": "bytes32", "internalType": "bytes32" }],
+      "outputs": [{ "name": "", "type": "bool", "internalType": "bool" }],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "owner",
+      "inputs": [],
+      "outputs": [{ "name": "", "type": "address", "internalType": "address" }],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "renounceOwnership",
+      "inputs": [],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "transferOwnership",
+      "inputs": [
+        { "name": "newOwner", "type": "address", "internalType": "address" }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "verifier",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "address",
+          "internalType": "contract HonkVerifier"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "event",
+      "name": "OwnershipTransferred",
+      "inputs": [
+        {
+          "name": "previousOwner",
+          "type": "address",
+          "indexed": true,
+          "internalType": "address"
+        },
+        {
+          "name": "newOwner",
+          "type": "address",
+          "indexed": true,
+          "internalType": "address"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "error",
+      "name": "OwnableInvalidOwner",
+      "inputs": [
+        { "name": "owner", "type": "address", "internalType": "address" }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "OwnableUnauthorizedAccount",
+      "inputs": [
+        { "name": "account", "type": "address", "internalType": "address" }
+      ]
+    }
+  ]"#
+);
 
 #[derive(Parser)]
 #[command(name = "Bond Wallet")]
@@ -70,22 +251,28 @@ struct Bond {
     created_at: String,
 }
 
-fn main() {
+fn main() -> Result<(), Box<dyn Error>> {
     let cli = Cli::parse();
 
-    match cli.command {
-        Commands::Onboard => onboard(),
-        Commands::Buy { value, maturity } => buy(value, maturity),
-        Commands::Trade { bond_a, bond_b } => trade(&bond_a, &bond_b),
-        Commands::Redeem { bond } => redeem(&bond),
-        Commands::Info { bond } => info(&bond),
-    }
+    // Run async commands
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        match cli.command {
+            Commands::Onboard => onboard().await,
+            Commands::Buy { value, maturity } => buy(value, maturity).await,
+            Commands::Trade { bond_a, bond_b } => trade(&bond_a, &bond_b).await,
+            Commands::Redeem { bond } => redeem(&bond).await,
+            Commands::Info { bond } => info(&bond),
+        }
+    });
+
+    Ok(())
 }
 
-fn onboard() {
-    println!("\n🔐 Initializing wallet...");
+async fn onboard() {
+    println!("\n🔐 Issuer Onboarding: Creating initial bond tranche...");
 
-    // Generate random seed
+    // Generate random seed for issuer
     let mut rng = rand::thread_rng();
     let seed_bytes: Vec<u8> = (0..32).map(|_| rng.gen()).collect();
     let seed_hex = hex::encode(&seed_bytes);
@@ -95,18 +282,103 @@ fn onboard() {
         created_at: Utc::now().to_rfc3339(),
     };
 
+    // Save wallet
     let filename = "wallet.json";
     match fs::write(filename, serde_json::to_string_pretty(&wallet).unwrap()) {
         Ok(_) => {
-            println!("✅ Wallet created!");
+            println!("✅ Issuer wallet created!");
             println!("   Seed: {} (KEEP SAFE!)", seed_hex);
             println!("   Saved to: {}", filename);
         }
-        Err(e) => println!("❌ Error: {}", e),
+        Err(e) => {
+            println!("❌ Error: {}", e);
+            return;
+        }
+    }
+
+    // Create initial Global Note commitment for the bond tranche
+    // Example: $100M bond tranche maturing 2030-01-01
+    let global_value = 100_000_000u64; // $100M in smallest units
+    let maturity_date = 1893456000u64; // 2030-01-01
+    let salt = rng.gen::<u64>();
+    let seed_u64 = u64::from_le_bytes(hex::decode(&seed_hex).unwrap()[0..8].try_into().unwrap());
+
+    let global_note = Note {
+        value: global_value,
+        salt,
+        owner: seed_u64,
+        asset_id: 1,
+        maturity_date,
+    };
+
+    // Compute commitment
+    let commitment = global_note.commit();
+    println!("\n📊 Global Note (Bond Tranche):");
+    println!("   Value:     {} (units)", global_value);
+    println!(
+        "   Maturity:  {} ({})",
+        maturity_date,
+        format_date(maturity_date)
+    );
+    println!("   Commitment: {}", commitment);
+
+    // Initialize a signer with a private key
+    let signer: PrivateKeySigner =
+        "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+            .parse()
+            .expect("Failed to parse private key");
+
+    // Instantiate a provider with the signer and a local anvil node
+    let provider = ProviderBuilder::new()
+        .wallet(signer)
+        .connect("http://127.0.0.1:8545")
+        .await
+        .expect("Failed to configure provider");
+
+    let private_bond_address = address!("0xdc64a140aa3e981100a9beca4e685f962f0cf6c9");
+    let private_bond = PrivateBond::new(private_bond_address, provider.clone());
+
+    let commitment_bytes_vec = commitment.to_string().into_bytes();
+    // Pad or truncate to exactly 32 bytes
+    let mut commitment_array = [0u8; 32];
+    let len = commitment_bytes_vec.len().min(32);
+    commitment_array[..len].copy_from_slice(&commitment_bytes_vec[..len]);
+
+    let mint_batch_tx = private_bond
+        .mintBatch(vec![alloy::primitives::FixedBytes::<32>::from(
+            commitment_array,
+        )])
+        .send()
+        .await
+        .expect("Failed to call mintBatch");
+
+    let mint_batch_receipt = mint_batch_tx
+        .get_receipt()
+        .await
+        .expect("Failed to send note batch");
+
+    println!("   Mint transaction sent:     {:#?}", mint_batch_receipt);
+
+    // Save the global note as initial bond
+    let bond = Bond {
+        commitment: format!("{}", commitment),
+        nullifier: "N/A (Global Note)".to_string(),
+        value: global_value,
+        salt,
+        seed: seed_hex.clone(),
+        asset_id: 1,
+        maturity_date,
+        created_at: Utc::now().to_rfc3339(),
+    };
+
+    let filename = "global_note_tranche.json";
+    match fs::write(filename, serde_json::to_string_pretty(&bond).unwrap()) {
+        Ok(_) => println!("\n✅ Global note saved to: {}", filename),
+        Err(e) => println!("❌ Error saving: {}", e),
     }
 }
 
-fn buy(value: u64, maturity: u64) {
+async fn buy(value: u64, maturity: u64) {
     println!("\n💳 Buying bond from issuer...");
     println!("   Value: {}", value);
     println!("   Maturity: {} ({})", maturity, format_date(maturity));
@@ -145,9 +417,21 @@ fn buy(value: u64, maturity: u64) {
         .unwrap();
     let nullifier = note.nullifer(private_key_val);
 
-    println!("\n✅ Bond issued!");
+    println!("\n✅ Bond created locally!");
     println!("   Commitment: {}", commitment);
     println!("   Nullifier:  {}", nullifier);
+
+    // Log contract call info (actual call would require proof generation)
+    println!("\n📝 Proof generation info:");
+    println!("   Command: nargo execute <witness> && bb prove -b ./target/<circuit>.json -w ./target/<witness> -o ./target");
+    println!("   Location: ../circuits/");
+    println!("   Status:   ℹ️  Run proof generation in circuits directory");
+
+    println!("\n📝 Contract call info:");
+    println!("   Function: mint(commitment, newRoot)");
+    println!("   Address:  {}", PRIVATE_BOND_ADDRESS);
+    println!("   RPC:      {}", RPC_URL);
+    println!("   Status:   ℹ️  Proof ready for on-chain submission");
 
     // Save bond
     let bond = Bond {
@@ -169,7 +453,7 @@ fn buy(value: u64, maturity: u64) {
     }
 }
 
-fn trade(bond_a_path: &str, bond_b_path: &str) {
+async fn trade(bond_a_path: &str, bond_b_path: &str) {
     println!("\n🔄 Trading bonds...");
 
     let bond_a = match load_bond(bond_a_path) {
@@ -214,10 +498,15 @@ fn trade(bond_a_path: &str, bond_b_path: &str) {
     println!("   Nullifier A marked spent: {}", bond_a.nullifier);
     println!("   Nullifier B marked spent: {}", bond_b.nullifier);
     println!("   New commitments generated for outputs");
-    println!("   Merkle root updated on-chain");
+
+    println!("\n📝 Contract call info:");
+    println!("   Function: atomicSwap(proofA, inputsA, proofB, inputsB)");
+    println!("   Address:  {}", PRIVATE_BOND_ADDRESS);
+    println!("   RPC:      {}", RPC_URL);
+    println!("   Status:   ℹ️  Proof generation needed before on-chain call");
 }
 
-fn redeem(bond_path: &str) {
+async fn redeem(bond_path: &str) {
     println!("\n💰 Redeeming bond...");
 
     let bond = match load_bond(bond_path) {
@@ -242,7 +531,12 @@ fn redeem(bond_path: &str) {
     println!("\n✅ Bond at maturity - ready to redeem!");
     println!("   Nullifier: {}", bond.nullifier);
     println!("   Value: {}", bond.value);
-    println!("   Action: call burn(proof, root, nullifier, ...)");
+
+    println!("\n📝 Contract call info:");
+    println!("   Function: burn(proof, root, nullifier, outputCommitment, maturityDate, isRedeem)");
+    println!("   Address:  {}", PRIVATE_BOND_ADDRESS);
+    println!("   RPC:      {}", RPC_URL);
+    println!("   Status:   ℹ️  Proof generation needed before on-chain call");
     println!("   Settlement: off-chain cash transfer");
 }
 

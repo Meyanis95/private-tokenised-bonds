@@ -15,14 +15,13 @@ contract PrivateBondScript is Script {
     function run() public {
         vm.startBroadcast();
 
-        owner = address(this);
-        verifier = new HonkVerifier();
+        owner = msg.sender;
         
+        verifier = new HonkVerifier();
         privateBond = new PrivateBond(address(verifier), owner);
 
         vm.stopBroadcast();
         
-        require(address(verifier) != address(0), "Verifier deployment failed");
         require(address(privateBond) != address(0), "PrivateBond deployment failed");
     }
 }
