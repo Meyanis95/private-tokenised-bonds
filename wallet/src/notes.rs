@@ -1,5 +1,13 @@
+use blake2::Blake2b;
+use chacha20poly1305::{ChaCha20Poly1305, KeyInit, Nonce};
 use ff::PrimeField;
 use poseidon_rs::{Fr, Poseidon};
+
+use crate::keys::ShieldedKeys;
+
+pub struct Memo {
+    pub ciphertext: Vec<u8>,
+}
 
 pub struct Note {
     pub value: u64,
@@ -32,5 +40,67 @@ impl Note {
 
         let hasher = Poseidon::new();
         hasher.hash(vec![f_salt, private_key]).unwrap()
+    }
+
+    /// Encrypt memo using BLAKE2b KDF + ChaCha20-Poly1305
+    pub fn encrypt(
+        sender_keys: &ShieldedKeys,
+        recipient_pubkey: &[u8; 32],
+        data: &Note,
+    ) -> Result<Memo, String> {
+        // 1. Compute shared secret via ECDH
+        let shared_secret = sender_keys.ecdh(recipient_pubkey);
+
+        // 2. Derive key using BLAKE2b(shared_secret || alice_pub || bob_pub)
+        let mut hasher = Blake2b::new();
+        hasher.update(&shared_secret);
+        hasher.update(sender_keys.public_viewing_key());
+        hasher.update(recipient_pubkey);
+        let key_bytes = hasher.finalize();
+        let key = &key_bytes.as_bytes()[..32];
+
+        // 3. Serialize Note
+        let note_bytes =
+            bincode::serialize(data).map_err(|e| format!("Serialization failed: {}", e))?;
+
+        // 4. Encrypt with ChaCha20-Poly1305
+        let cipher = ChaCha20Poly1305::new(key.into());
+        let nonce = Nonce::from_slice(&[0u8; 12]); // Deterministic nonce
+        let ciphertext = cipher
+            .encrypt(nonce, note_bytes.as_ref())
+            .map_err(|e| format!("Encryption failed: {}", e))?;
+
+        Ok(Memo { ciphertext })
+    }
+
+    /// Decrypt memo (only recipient can do this)
+    pub fn decrypt(
+        recipient_keys: &ShieldedKeys,
+        sender_pubkey: &[u8; 32],
+        memo: &Memo,
+    ) -> Result<Note, String> {
+        // 1. Compute shared secret via ECDH
+        let shared_secret = recipient_keys.ecdh(sender_pubkey);
+
+        // 2. Derive key using BLAKE2b(shared_secret || sender_pub || recipient_pub)
+        let mut hasher = Blake2b::new();
+        hasher.update(&shared_secret);
+        hasher.update(sender_pubkey);
+        hasher.update(recipient_keys.public_viewing_key());
+        let key_bytes = hasher.finalize();
+        let key = &key_bytes.as_bytes()[..32];
+
+        // 3. Decrypt with ChaCha20-Poly1305
+        let cipher = ChaCha20Poly1305::new(key.into());
+        let nonce = Nonce::from_slice(&[0u8; 12]); // Same deterministic nonce
+        let plaintext = cipher
+            .decrypt(nonce, memo.ciphertext.as_ref())
+            .map_err(|e| format!("Decryption failed: {}", e))?;
+
+        // 4. Deserialize Note
+        let note: Note = bincode::deserialize(&plaintext)
+            .map_err(|e| format!("Deserialization failed: {}", e))?;
+
+        Ok(note)
     }
 }

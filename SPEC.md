@@ -53,9 +53,8 @@ Traders interact via Issuer as relayer:
 
 ```
 shared_secret = X25519(alice_privkey_x25519, bob_pubkey_x25519)
-aes_key = HKDF-SHA256(shared_secret, "", alice || bob, 32)
-nonce = HKDF-SHA256(shared_secret, "", alice || bob || "nonce", 12)
-ciphertext = AES-256-GCM(aes_key, nonce, {value, salt, owner, assetId})
+Key = BLAKE2b(S ∥ A_eph ∥ B_static)
+Ciphertext = ChaCha20-Poly1305(Key, Note_Data)
 ```
 
 ## Redemption & Maturity
