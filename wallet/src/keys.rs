@@ -1,4 +1,5 @@
 use ff::PrimeField;
+use num_bigint::BigUint;
 use poseidon_rs::{Fr, Poseidon};
 use rand::{self, Rng};
 use serde::{Deserialize, Serialize};
@@ -65,16 +66,43 @@ impl ShieldedKeys {
         (*viewing_secret.as_bytes(), *viewing_public.as_bytes())
     }
 
+    /// Parse hex string in Fr(0x...) format to Fr
+    fn parse_fr_hex(hex_str: &str) -> Fr {
+        // Strip "Fr(0x" prefix and ")" suffix
+        let clean = hex_str
+            .trim_start_matches("Fr(0x")
+            .trim_start_matches("Fr(")
+            .trim_start_matches("0x")
+            .trim_end_matches(')');
+        
+        // Parse hex to big integer, then to Fr
+        // Fr::from_str expects decimal, so we convert hex to decimal
+        let bytes = match hex::decode(clean) {
+            Ok(b) => b,
+            Err(_) => {
+                // If hex decode fails, try parsing as decimal string
+                return Fr::from_str(clean).unwrap_or(Fr::from_str("0").unwrap());
+            }
+        };
+        
+        if bytes.is_empty() {
+            // Fallback: try parsing as decimal string
+            return Fr::from_str(clean).unwrap_or(Fr::from_str("0").unwrap());
+        }
+        
+        // Convert bytes to BigUint, then to decimal string for Fr::from_str
+        let num = BigUint::from_bytes_be(&bytes);
+        Fr::from_str(&num.to_string()).unwrap_or(Fr::from_str("0").unwrap())
+    }
+
     /// Reconstruct the private spending key Fr from stored hex
-    fn get_private_spending_key(&self) -> Fr {
-        Fr::from_str(&self.private_spending_key_hex)
-            .expect("Failed to parse stored private spending key")
+    pub fn get_private_spending_key(&self) -> Fr {
+        Self::parse_fr_hex(&self.private_spending_key_hex)
     }
 
     /// Reconstruct the public spending key Fr from stored hex
     fn get_public_spending_key(&self) -> Fr {
-        Fr::from_str(&self.public_spending_key_hex)
-            .expect("Failed to parse stored public spending key")
+        Self::parse_fr_hex(&self.public_spending_key_hex)
     }
 
     /// Reconstruct the private viewing key StaticSecret from seed

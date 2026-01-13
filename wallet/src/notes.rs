@@ -1,7 +1,8 @@
-use blake2::Blake2b;
-use chacha20poly1305::{ChaCha20Poly1305, KeyInit, Nonce};
+use blake2::{Blake2b512, Digest};
+use chacha20poly1305::{aead::Aead, ChaCha20Poly1305, KeyInit, Nonce};
 use ff::PrimeField;
 use poseidon_rs::{Fr, Poseidon};
+use serde::{Deserialize, Serialize};
 
 use crate::keys::ShieldedKeys;
 
@@ -9,6 +10,7 @@ pub struct Memo {
     pub ciphertext: Vec<u8>,
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Note {
     pub value: u64,
     pub salt: u64,
@@ -52,12 +54,12 @@ impl Note {
         let shared_secret = sender_keys.ecdh(recipient_pubkey);
 
         // 2. Derive key using BLAKE2b(shared_secret || alice_pub || bob_pub)
-        let mut hasher = Blake2b::new();
+        let mut hasher = Blake2b512::new();
         hasher.update(&shared_secret);
         hasher.update(sender_keys.public_viewing_key());
         hasher.update(recipient_pubkey);
         let key_bytes = hasher.finalize();
-        let key = &key_bytes.as_bytes()[..32];
+        let key = &key_bytes[..32];
 
         // 3. Serialize Note
         let note_bytes =
@@ -83,12 +85,12 @@ impl Note {
         let shared_secret = recipient_keys.ecdh(sender_pubkey);
 
         // 2. Derive key using BLAKE2b(shared_secret || sender_pub || recipient_pub)
-        let mut hasher = Blake2b::new();
+        let mut hasher = Blake2b512::new();
         hasher.update(&shared_secret);
         hasher.update(sender_pubkey);
         hasher.update(recipient_keys.public_viewing_key());
         let key_bytes = hasher.finalize();
-        let key = &key_bytes.as_bytes()[..32];
+        let key = &key_bytes[..32];
 
         // 3. Decrypt with ChaCha20-Poly1305
         let cipher = ChaCha20Poly1305::new(key.into());

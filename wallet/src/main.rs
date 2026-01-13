@@ -1,5 +1,8 @@
 use chrono::Utc;
 use clap::{Parser, Subcommand};
+use ff::PrimeField;
+use num_bigint::BigUint;
+use poseidon_rs::Fr;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::error::Error;
@@ -16,7 +19,9 @@ mod notes;
 mod prover;
 
 use config::{PRIVATE_BOND_ADDRESS, RPC_URL};
+use merkle::FixedMerkleTree;
 use notes::Note;
+use prover::{build_joinsplit_witness, generate_proof, CircuitNote, MerklePath};
 
 use crate::keys::ShieldedKeys;
 
@@ -206,12 +211,17 @@ enum Commands {
     /// Initialize wallet: generate seed and keys
     Onboard,
 
-    /// Buy bond from issuer
+    /// Buy bond from issuer (splits issuer's note)
     Buy {
+        /// Amount to buy
         #[arg(long)]
         value: u64,
+        /// Path to issuer's source note (being split)
         #[arg(long)]
-        maturity: u64,
+        source_note: String,
+        /// Path to issuer's wallet (for signing)
+        #[arg(long)]
+        issuer_wallet: String,
     },
 
     /// Trade: swap two bonds P2P
@@ -253,6 +263,81 @@ struct Bond {
     created_at: String,
 }
 
+/// Tree state file for persisting commitments
+const TREE_STATE_FILE: &str = "tree_state.json";
+
+#[derive(Serialize, Deserialize, Debug, Default)]
+struct TreeState {
+    /// List of commitment strings in insertion order (stored as Fr debug format)
+    commitments: Vec<String>,
+}
+
+impl TreeState {
+    fn load() -> Self {
+        match fs::read_to_string(TREE_STATE_FILE) {
+            Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
+            Err(_) => TreeState::default(),
+        }
+    }
+    
+    fn save(&self) {
+        let _ = fs::write(TREE_STATE_FILE, serde_json::to_string_pretty(self).unwrap());
+    }
+    
+    fn add_commitment(&mut self, commitment_fr: Fr) -> usize {
+        let index = self.commitments.len();
+        // Store as the Fr debug format for consistency
+        self.commitments.push(format!("{}", commitment_fr));
+        self.save();
+        index
+    }
+    
+    fn find_commitment(&self, commitment_str: &str) -> Option<usize> {
+        self.commitments.iter().position(|c| c == commitment_str)
+    }
+    
+    /// Build a merkle tree from stored commitments
+    fn build_tree(&self) -> FixedMerkleTree {
+        let mut tree = FixedMerkleTree::new();
+        for comm_str in &self.commitments {
+            if let Some(fr) = Self::parse_commitment(comm_str) {
+                tree.insert(fr);
+            }
+        }
+        tree
+    }
+    
+    /// Parse commitment string (Fr(0x...) format) to Fr
+    fn parse_commitment(s: &str) -> Option<Fr> {
+        // Strip "Fr(0x" prefix and ")" suffix
+        let clean = s
+            .trim_start_matches("Fr(0x")
+            .trim_start_matches("Fr(")
+            .trim_start_matches("0x")
+            .trim_end_matches(')');
+        
+        // Try parsing as hex
+        if let Ok(bytes) = hex::decode(clean) {
+            if !bytes.is_empty() {
+                // Convert hex bytes to a big number, then to Fr
+                let mut num_bytes = [0u8; 32];
+                let start = if bytes.len() > 32 { bytes.len() - 32 } else { 0 };
+                let copy_start = 32 - std::cmp::min(32, bytes.len());
+                num_bytes[copy_start..].copy_from_slice(&bytes[start..]);
+                
+                // Convert to decimal string for Fr::from_str
+                let result = BigUint::from_bytes_be(&num_bytes);
+                if let Some(fr) = Fr::from_str(&result.to_string()) {
+                    return Some(fr);
+                }
+            }
+        }
+        
+        // Fallback: try parsing as decimal
+        Fr::from_str(clean)
+    }
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let cli = Cli::parse();
 
@@ -261,7 +346,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     rt.block_on(async {
         match cli.command {
             Commands::Onboard => onboard(&cli.wallet).await,
-            Commands::Buy { value, maturity } => buy(&cli.wallet, value, maturity).await,
+            Commands::Buy { value, source_note, issuer_wallet } => {
+                buy(&cli.wallet, value, &source_note, &issuer_wallet).await
+            }
             Commands::Trade { bond_a, bond_b } => trade(&cli.wallet, &bond_a, &bond_b).await,
             Commands::Redeem { bond } => redeem(&cli.wallet, &bond).await,
             Commands::Info { bond } => info(&bond),
@@ -304,23 +391,20 @@ async fn onboard(wallet_name: &str) {
     let mut rng = rand::thread_rng();
     let salt = rng.gen::<u64>();
 
-    // Extract owner as u64 from seed (first 8 bytes)
-    let owner_u64 = u64::from_le_bytes(
-        keys.public_spending_key_hex.as_bytes()[..8]
-            .try_into()
-            .expect("Failed to convert to [u8; 8]"),
-    );
+    // Get owner as Fr (proper field element)
+    let owner_fr = keys.public_spending_key();
 
-    let global_note = Note {
+    // Create CircuitNote for commitment computation (matches circuit exactly)
+    let global_note = CircuitNote {
         value: global_value,
         salt,
-        owner: owner_u64,
+        owner: owner_fr.clone(),
         asset_id: 1,
         maturity_date,
     };
 
-    // Compute commitment
-    let commitment = global_note.commit();
+    // Compute commitment using CircuitNote.commitment() - matches circuit's note_commit
+    let commitment = global_note.commitment();
     println!("\n📊 Global Note (Bond Tranche):");
     println!("   Value:     {} (units)", global_value);
     println!(
@@ -367,6 +451,24 @@ async fn onboard(wallet_name: &str) {
 
     println!("   Mint transaction sent:     {:#?}", mint_batch_receipt);
 
+    // Add commitment to the global tree state
+    let mut tree_state = TreeState::load();
+    let leaf_index = tree_state.add_commitment(commitment);
+    println!("   Added real note to merkle tree at index: {}", leaf_index);
+    
+    // Also add the dummy note (value=0, salt=0, same owner) to the tree
+    // This is required because the circuit verifies merkle proofs for both inputs
+    let dummy_note = CircuitNote {
+        value: 0,
+        salt: 0,
+        owner: owner_fr.clone(),
+        asset_id: 1,
+        maturity_date,
+    };
+    let dummy_commitment = dummy_note.commitment();
+    let dummy_index = tree_state.add_commitment(dummy_commitment);
+    println!("   Added dummy note to merkle tree at index: {}", dummy_index);
+
     // Save the global note as initial bond
     let bond = Bond {
         commitment: format!("{}", commitment),
@@ -386,79 +488,234 @@ async fn onboard(wallet_name: &str) {
     }
 }
 
-async fn buy(wallet_name: &str, value: u64, maturity: u64) {
+async fn buy(buyer_wallet_name: &str, buy_value: u64, source_note_path: &str, issuer_wallet_path: &str) {
     println!("\n💳 Buying bond from issuer...");
-    println!("   Value: {}", value);
-    println!("   Maturity: {} ({})", maturity, format_date(maturity));
+    println!("   Buy amount: {}", buy_value);
 
-    // Load wallet to get keys
-    let wallet = match load_wallet(wallet_name) {
+    // 1. Load buyer's wallet (to get buyer's public key)
+    let buyer_wallet = match load_wallet(buyer_wallet_name) {
         Some(w) => w,
         None => {
-            println!("❌ No wallet found. Run 'onboard' first.");
+            println!("❌ Buyer wallet '{}' not found. Run 'onboard' first.", buyer_wallet_name);
             return;
         }
     };
 
-    // Generate random salt
-    let mut rng = rand::thread_rng();
-    let salt = rng.gen::<u64>();
-
-    // Get owner from wallet's public spending key
-    let owner_u64 = u64::from_le_bytes(
-        wallet.keys.public_spending_key_hex.as_bytes()[..8]
-            .try_into()
-            .expect("Failed to convert to [u8; 8]"),
-    );
-
-    let note = Note {
-        value,
-        salt,
-        owner: owner_u64,
-        asset_id: 1,
-        maturity_date: maturity,
+    // 2. Load issuer's wallet (for private key to sign nullifier)
+    let issuer_wallet = match load_wallet(issuer_wallet_path) {
+        Some(w) => w,
+        None => {
+            println!("❌ Issuer wallet '{}' not found.", issuer_wallet_path);
+            return;
+        }
     };
 
-    // Compute commitment and nullifier
-    let commitment = note.commit();
+    // 3. Load source note (issuer's note being split)
+    let source_bond = match load_bond(source_note_path) {
+        Some(b) => b,
+        None => {
+            println!("❌ Source note '{}' not found.", source_note_path);
+            return;
+        }
+    };
 
-    // Use the wallet's keys to compute proper nullifier
-    let nullifier = wallet.keys.sign_nullifier(salt);
+    // Validate: buy value must be less than source note value
+    if buy_value >= source_bond.value {
+        println!("❌ Buy value ({}) must be less than source note value ({}).", buy_value, source_bond.value);
+        return;
+    }
 
-    println!("\n✅ Bond created locally!");
-    println!("   Commitment: {}", commitment);
-    println!("   Nullifier:  {}", nullifier);
+    let change_value = source_bond.value - buy_value;
+    println!("   Source note: {} (value={})", source_note_path, source_bond.value);
+    println!("   Change to issuer: {}", change_value);
+    println!("   Maturity: {} ({})", source_bond.maturity_date, format_date(source_bond.maturity_date));
 
-    // Log contract call info (actual call would require proof generation)
-    println!("\n📝 Proof generation info:");
-    println!("   Command: nargo execute <witness> && bb prove -b ./target/<circuit>.json -w ./target/<witness> -o ./target");
-    println!("   Location: ../circuits/");
-    println!("   Status:   ℹ️  Run proof generation in circuits directory");
+    // 4. Create INPUT note (issuer's note being consumed)
+    let issuer_owner_fr = issuer_wallet.keys.public_spending_key();
 
-    println!("\n📝 Contract call info:");
-    println!("   Function: mint(commitment, newRoot)");
-    println!("   Address:  {}", PRIVATE_BOND_ADDRESS);
-    println!("   RPC:      {}", RPC_URL);
-    println!("   Status:   ℹ️  Proof ready for on-chain submission");
+    let input_note = CircuitNote {
+        value: source_bond.value,
+        salt: source_bond.salt,
+        owner: issuer_owner_fr.clone(),
+        asset_id: source_bond.asset_id,
+        maturity_date: source_bond.maturity_date,
+    };
 
-    // Save bond
-    let bond = Bond {
-        commitment: format!("{}", commitment),
-        nullifier: format!("{}", nullifier),
-        value,
-        salt,
-        owner: wallet.keys.public_spending_key_hex.clone(),
-        asset_id: 1,
-        maturity_date: maturity,
+    // 5. Compute nullifier for input note (issuer signs)
+    let input_nullifier_fr = issuer_wallet.keys.sign_nullifier(source_bond.salt);
+    
+    // Debug: verify nullifier computation uses the same private key
+    let private_key_debug = issuer_wallet.keys.get_private_spending_key();
+    println!("   DEBUG: salt={}, private_key={}", source_bond.salt, private_key_debug);
+    println!("   DEBUG: computed nullifier={}", input_nullifier_fr);
+
+    // 6. Create OUTPUT notes
+    let mut rng = rand::thread_rng();
+    
+    // Output 1: Buyer's note
+    let buyer_salt = rng.gen::<u64>();
+    let buyer_owner_fr = buyer_wallet.keys.public_spending_key();
+
+    let buyer_note = CircuitNote {
+        value: buy_value,
+        salt: buyer_salt,
+        owner: buyer_owner_fr.clone(),
+        asset_id: source_bond.asset_id,
+        maturity_date: source_bond.maturity_date,
+    };
+
+    // Output 2: Issuer's change note
+    let change_salt = rng.gen::<u64>();
+    let change_note = CircuitNote {
+        value: change_value,
+        salt: change_salt,
+        owner: issuer_owner_fr.clone(),
+        asset_id: source_bond.asset_id,
+        maturity_date: source_bond.maturity_date,
+    };
+
+    // 7. Compute output commitments using CircuitNote.commitment() - matches circuit
+    let buyer_commitment_fr = buyer_note.commitment();
+    let change_commitment_fr = change_note.commitment();
+
+    println!("\n📊 JoinSplit Summary:");
+    println!("   INPUT:  value={}, nullifier={}", source_bond.value, input_nullifier_fr);
+    println!("   OUTPUT1 (buyer):  value={}, commitment={}", buy_value, buyer_commitment_fr);
+    println!("   OUTPUT2 (change): value={}, commitment={}", change_value, change_commitment_fr);
+
+    // 8. Build merkle tree and generate proofs for both input notes
+    let mut tree_state = TreeState::load();
+    
+    // Find the source note's commitment in the tree (should be at index 0)
+    let source_commitment_str = &source_bond.commitment;
+    let real_note_index = match tree_state.find_commitment(source_commitment_str) {
+        Some(idx) => idx,
+        None => {
+            println!("❌ Source note commitment not found in tree state!");
+            println!("   Commitment: {}", source_commitment_str);
+            println!("   ℹ️  Make sure the issuer ran 'onboard' to register the initial note.");
+            return;
+        }
+    };
+    
+    // Create dummy note (value=0, salt=0) and find its commitment (should be at index 1)
+    let dummy_note = CircuitNote {
+        value: 0,
+        salt: 0,
+        owner: issuer_owner_fr.clone(),
+        asset_id: source_bond.asset_id,
+        maturity_date: source_bond.maturity_date,
+    };
+    let dummy_commitment = dummy_note.commitment();
+    let dummy_commitment_str = format!("{}", dummy_commitment);
+    
+    let dummy_note_index = match tree_state.find_commitment(&dummy_commitment_str) {
+        Some(idx) => idx,
+        None => {
+            println!("❌ Dummy note commitment not found in tree state!");
+            println!("   Commitment: {}", dummy_commitment_str);
+            println!("   ℹ️  The issuer's onboard should have added both real and dummy notes.");
+            return;
+        }
+    };
+    
+    println!("   Real note at tree index: {}", real_note_index);
+    println!("   Dummy note at tree index: {}", dummy_note_index);
+    
+    // Build the merkle tree and generate proofs for BOTH notes
+    let tree = tree_state.build_tree();
+    let merkle_root = tree.root();
+    let real_note_path = tree.generate_proof(real_note_index);
+    let dummy_note_path = tree.generate_proof(dummy_note_index);
+    
+    println!("   Merkle root: {}", merkle_root);
+    println!("   Real note path_indices: {:?}", real_note_path.indices);
+    println!("   Dummy note path_indices: {:?}", dummy_note_path.indices);
+
+    // Get issuer's private spending key
+    let private_key_fr = issuer_wallet.keys.get_private_spending_key();
+
+    // Build JoinSplit witness: 2 inputs (real + dummy) -> 2 outputs (buyer + change)
+    let witness = build_joinsplit_witness(
+        merkle_root,
+        input_note,
+        real_note_path,
+        input_nullifier_fr,
+        dummy_note,
+        dummy_note_path,
+        [buyer_note.clone(), change_note.clone()],
+        [buyer_commitment_fr.clone(), change_commitment_fr.clone()],
+        private_key_fr,
+    );
+
+    // 9. Write Prover.toml
+    let circuit_dir = "../circuits";
+    match witness.write_prover_toml(circuit_dir) {
+        Ok(_) => println!("\n✅ Witness written to {}/Prover.toml", circuit_dir),
+        Err(e) => {
+            println!("❌ Failed to write witness: {}", e);
+            return;
+        }
+    }
+
+    // 10. Generate proof
+    println!("\n🔐 Generating ZK proof...");
+    match generate_proof(circuit_dir, "circuits").await {
+        Ok(proof_path) => {
+            println!("   ✅ Proof saved to: {}", proof_path);
+        }
+        Err(e) => {
+            println!("   ⚠️  Proof generation failed: {}", e);
+            println!("   ℹ️  You can run manually:");
+            println!("      cd {} && nargo execute circuits && bb prove -b ./target/circuits.json -w ./target/circuits -o ./target", circuit_dir);
+        }
+    }
+
+    // 11. Save buyer's bond
+    let buyer_bond = Bond {
+        commitment: format!("{}", buyer_commitment_fr),
+        nullifier: format!("{}", buyer_wallet.keys.sign_nullifier(buyer_salt)),
+        value: buy_value,
+        salt: buyer_salt,
+        owner: buyer_wallet.keys.public_spending_key_hex.clone(),
+        asset_id: source_bond.asset_id,
+        maturity_date: source_bond.maturity_date,
         created_at: Utc::now().to_rfc3339(),
     };
 
-    let commit_str = format!("{}", commitment);
-    let filename = format!("bond_{}_{}.json", wallet_name, &commit_str[4..16]); // Extract hex portion
-    match fs::write(&filename, serde_json::to_string_pretty(&bond).unwrap()) {
-        Ok(_) => println!("   Saved to: {}", filename),
-        Err(e) => println!("❌ Error saving: {}", e),
+    let buyer_filename = format!("bond_{}_{}.json", buyer_wallet_name, &format!("{:016x}", buyer_salt)[..8]);
+    match fs::write(&buyer_filename, serde_json::to_string_pretty(&buyer_bond).unwrap()) {
+        Ok(_) => println!("\n✅ Buyer bond saved to: {}", buyer_filename),
+        Err(e) => println!("❌ Error saving buyer bond: {}", e),
     }
+
+    // 12. Save issuer's change note (update source)
+    let change_bond = Bond {
+        commitment: format!("{}", change_commitment_fr),
+        nullifier: format!("{}", issuer_wallet.keys.sign_nullifier(change_salt)),
+        value: change_value,
+        salt: change_salt,
+        owner: issuer_wallet.keys.public_spending_key_hex.clone(),
+        asset_id: source_bond.asset_id,
+        maturity_date: source_bond.maturity_date,
+        created_at: Utc::now().to_rfc3339(),
+    };
+
+    let change_filename = format!("issuer_change_{}.json", &format!("{:016x}", change_salt)[..8]);
+    match fs::write(&change_filename, serde_json::to_string_pretty(&change_bond).unwrap()) {
+        Ok(_) => println!("✅ Issuer change note saved to: {}", change_filename),
+        Err(e) => println!("❌ Error saving change note: {}", e),
+    }
+
+    // 13. Add new commitments to tree state (for future transactions)
+    tree_state.add_commitment(buyer_commitment_fr.clone());
+    tree_state.add_commitment(change_commitment_fr.clone());
+    println!("   📝 Added 2 new commitments to merkle tree");
+
+    println!("\n📝 Contract call info:");
+    println!("   Function: burn(proof, root, nullifier, [newCommitment1, newCommitment2], maturityDate, isRedeem=false)");
+    println!("   Address:  {}", PRIVATE_BOND_ADDRESS);
+    println!("   Status:   ℹ️  Ready for Task 5 (contract integration)");
 }
 
 async fn trade(_wallet_name: &str, bond_a_path: &str, bond_b_path: &str) {
