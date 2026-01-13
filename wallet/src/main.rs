@@ -1,6 +1,5 @@
 use chrono::Utc;
 use clap::{Parser, Subcommand};
-use ff::Field;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::error::Error;
@@ -18,6 +17,8 @@ mod prover;
 
 use config::{PRIVATE_BOND_ADDRESS, RPC_URL};
 use notes::Note;
+
+use crate::keys::ShieldedKeys;
 
 sol!(
     #[sol(rpc)]
@@ -193,6 +194,9 @@ sol!(
 #[command(name = "Bond Wallet")]
 #[command(about = "CLI wallet for zero-coupon bond protocol", long_about = None)]
 struct Cli {
+    #[arg(long, default_value = "wallet")]
+    wallet: String,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -233,7 +237,7 @@ enum Commands {
 
 #[derive(Serialize, Deserialize, Debug)]
 struct Wallet {
-    seed: String,
+    keys: ShieldedKeys,
     created_at: String,
 }
 
@@ -243,7 +247,7 @@ struct Bond {
     nullifier: String,
     value: u64,
     salt: u64,
-    seed: String,
+    owner: String,
     asset_id: u64,
     maturity_date: u64,
     created_at: String,
@@ -256,10 +260,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
         match cli.command {
-            Commands::Onboard => onboard().await,
-            Commands::Buy { value, maturity } => buy(value, maturity).await,
-            Commands::Trade { bond_a, bond_b } => trade(&bond_a, &bond_b).await,
-            Commands::Redeem { bond } => redeem(&bond).await,
+            Commands::Onboard => onboard(&cli.wallet).await,
+            Commands::Buy { value, maturity } => buy(&cli.wallet, value, maturity).await,
+            Commands::Trade { bond_a, bond_b } => trade(&cli.wallet, &bond_a, &bond_b).await,
+            Commands::Redeem { bond } => redeem(&cli.wallet, &bond).await,
             Commands::Info { bond } => info(&bond),
         }
     });
@@ -267,25 +271,22 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-async fn onboard() {
+async fn onboard(wallet_name: &str) {
     println!("\n🔐 Issuer Onboarding: Creating initial bond tranche...");
 
-    // Generate random seed for issuer
-    let mut rng = rand::thread_rng();
-    let seed_bytes: Vec<u8> = (0..32).map(|_| rng.gen()).collect();
-    let seed_hex = hex::encode(&seed_bytes);
+    // Generate keys for issuer
+    let keys = ShieldedKeys::generate();
 
     let wallet = Wallet {
-        seed: seed_hex.clone(),
+        keys: keys.clone(),
         created_at: Utc::now().to_rfc3339(),
     };
 
     // Save wallet
-    let filename = "wallet.json";
-    match fs::write(filename, serde_json::to_string_pretty(&wallet).unwrap()) {
+    let filename = format!("{}.json", wallet_name);
+    match fs::write(&filename, serde_json::to_string_pretty(&wallet).unwrap()) {
         Ok(_) => {
             println!("✅ Issuer wallet created!");
-            println!("   Seed: {} (KEEP SAFE!)", seed_hex);
             println!("   Saved to: {}", filename);
         }
         Err(e) => {
@@ -298,13 +299,22 @@ async fn onboard() {
     // Example: $100M bond tranche maturing 2030-01-01
     let global_value = 100_000_000u64; // $100M in smallest units
     let maturity_date = 1893456000u64; // 2030-01-01
+
+    // Generate random salt
+    let mut rng = rand::thread_rng();
     let salt = rng.gen::<u64>();
-    let seed_u64 = u64::from_le_bytes(hex::decode(&seed_hex).unwrap()[0..8].try_into().unwrap());
+
+    // Extract owner as u64 from seed (first 8 bytes)
+    let owner_u64 = u64::from_le_bytes(
+        keys.public_spending_key_hex.as_bytes()[..8]
+            .try_into()
+            .expect("Failed to convert to [u8; 8]"),
+    );
 
     let global_note = Note {
         value: global_value,
         salt,
-        owner: seed_u64,
+        owner: owner_u64,
         asset_id: 1,
         maturity_date,
     };
@@ -363,7 +373,7 @@ async fn onboard() {
         nullifier: "N/A (Global Note)".to_string(),
         value: global_value,
         salt,
-        seed: seed_hex.clone(),
+        owner: keys.public_spending_key_hex,
         asset_id: 1,
         maturity_date,
         created_at: Utc::now().to_rfc3339(),
@@ -376,13 +386,13 @@ async fn onboard() {
     }
 }
 
-async fn buy(value: u64, maturity: u64) {
+async fn buy(wallet_name: &str, value: u64, maturity: u64) {
     println!("\n💳 Buying bond from issuer...");
     println!("   Value: {}", value);
     println!("   Maturity: {} ({})", maturity, format_date(maturity));
 
-    // Load wallet to get seed
-    let wallet = match load_wallet() {
+    // Load wallet to get keys
+    let wallet = match load_wallet(wallet_name) {
         Some(w) => w,
         None => {
             println!("❌ No wallet found. Run 'onboard' first.");
@@ -394,26 +404,26 @@ async fn buy(value: u64, maturity: u64) {
     let mut rng = rand::thread_rng();
     let salt = rng.gen::<u64>();
 
-    // Create bond note
-    let seed_u64 = u64::from_le_bytes(hex::decode(&wallet.seed).unwrap()[0..8].try_into().unwrap());
+    // Get owner from wallet's public spending key
+    let owner_u64 = u64::from_le_bytes(
+        wallet.keys.public_spending_key_hex.as_bytes()[..8]
+            .try_into()
+            .expect("Failed to convert to [u8; 8]"),
+    );
 
     let note = Note {
         value,
         salt,
-        owner: seed_u64,
+        owner: owner_u64,
         asset_id: 1,
         maturity_date: maturity,
     };
 
     // Compute commitment and nullifier
     let commitment = note.commit();
-    // Create private key from seed - simplified for demo
-    let private_key_val = poseidon_rs::Poseidon::new()
-        .hash(vec![
-            poseidon_rs::Fr::one(), // placeholder - in production would properly derive
-        ])
-        .unwrap();
-    let nullifier = note.nullifer(private_key_val);
+
+    // Use the wallet's keys to compute proper nullifier
+    let nullifier = wallet.keys.sign_nullifier(salt);
 
     println!("\n✅ Bond created locally!");
     println!("   Commitment: {}", commitment);
@@ -437,21 +447,21 @@ async fn buy(value: u64, maturity: u64) {
         nullifier: format!("{}", nullifier),
         value,
         salt,
-        seed: wallet.seed,
+        owner: wallet.keys.public_spending_key_hex.clone(),
         asset_id: 1,
         maturity_date: maturity,
         created_at: Utc::now().to_rfc3339(),
     };
 
     let commit_str = format!("{}", commitment);
-    let filename = format!("bond_{}.json", &commit_str[4..16]); // Extract hex portion
+    let filename = format!("bond_{}_{}.json", wallet_name, &commit_str[4..16]); // Extract hex portion
     match fs::write(&filename, serde_json::to_string_pretty(&bond).unwrap()) {
         Ok(_) => println!("   Saved to: {}", filename),
         Err(e) => println!("❌ Error saving: {}", e),
     }
 }
 
-async fn trade(bond_a_path: &str, bond_b_path: &str) {
+async fn trade(_wallet_name: &str, bond_a_path: &str, bond_b_path: &str) {
     println!("\n🔄 Trading bonds...");
 
     let bond_a = match load_bond(bond_a_path) {
@@ -504,7 +514,7 @@ async fn trade(bond_a_path: &str, bond_b_path: &str) {
     println!("   Status:   ℹ️  Proof generation needed before on-chain call");
 }
 
-async fn redeem(bond_path: &str) {
+async fn redeem(_wallet_name: &str, bond_path: &str) {
     println!("\n💰 Redeeming bond...");
 
     let bond = match load_bond(bond_path) {
@@ -563,8 +573,9 @@ fn info(bond_path: &str) {
     }
 }
 
-fn load_wallet() -> Option<Wallet> {
-    match fs::read_to_string("wallet.json") {
+fn load_wallet(wallet_name: &str) -> Option<Wallet> {
+    let filename = format!("{}.json", wallet_name);
+    match fs::read_to_string(&filename) {
         Ok(content) => serde_json::from_str(&content).ok(),
         Err(_) => None,
     }
