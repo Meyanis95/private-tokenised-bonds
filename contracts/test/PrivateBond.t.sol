@@ -106,7 +106,9 @@ contract PrivateBondTest is Test {
         privateBond.mint(0x1de409fb2319657514027650e41731fc3c5b77448fdd2b9aceeda9cf95c499e7, ROOT);
         vm.warp(1893456000);
 
-        privateBond.burn("", ROOT, NULL_A, bytes32(0), MATURITY, bytes32(uint256(1)));
+        bytes32[2] memory nullsIn = [NULL_A, NULL_B];
+        bytes32[2] memory commsOut = [bytes32(0), bytes32(0)];
+        privateBond.burn("", ROOT, nullsIn, commsOut, MATURITY, bytes32(uint256(1)));
         assertTrue(privateBond.nullifiers(NULL_A));
     }
 
@@ -114,31 +116,39 @@ contract PrivateBondTest is Test {
         privateBond.mint(0x1de409fb2319657514027650e41731fc3c5b77448fdd2b9aceeda9cf95c499e7, ROOT);
         vm.warp(1893456000 - 365 days);
 
-        vm.expectRevert("Bond not at maturity yet, cannot be burnt");
-        privateBond.burn("", ROOT, NULL_A, bytes32(0), MATURITY, bytes32(uint256(1)));
+        bytes32[2] memory nullsIn = [NULL_A, NULL_B];
+        bytes32[2] memory commsOut = [bytes32(0), bytes32(0)];
+        vm.expectRevert("Bond not at maturity yet");
+        privateBond.burn("", ROOT, nullsIn, commsOut, MATURITY, bytes32(uint256(1)));
     }
 
     function testPreventDoubleRedemption() public {
         privateBond.mint(0x1de409fb2319657514027650e41731fc3c5b77448fdd2b9aceeda9cf95c499e7, ROOT);
         vm.warp(1893456000);
 
-        privateBond.burn("", ROOT, NULL_A, bytes32(0), MATURITY, bytes32(uint256(1)));
-        vm.expectRevert("Bond already spent");
-        privateBond.burn("", ROOT, NULL_A, bytes32(0), MATURITY, bytes32(uint256(1)));
+        bytes32[2] memory nullsIn = [NULL_A, NULL_B];
+        bytes32[2] memory commsOut = [bytes32(0), bytes32(0)];
+        privateBond.burn("", ROOT, nullsIn, commsOut, MATURITY, bytes32(uint256(1)));
+        vm.expectRevert("Note 0 already spent");
+        privateBond.burn("", ROOT, nullsIn, commsOut, MATURITY, bytes32(uint256(1)));
     }
 
     function testInvalidRoot() public {
         bytes32 badRoot = 0xdead0000000000000000000000000000dead0000000000000000000000000000;
+        bytes32[2] memory nullsIn = [NULL_A, NULL_B];
+        bytes32[2] memory commsOut = [bytes32(0), bytes32(0)];
         vm.expectRevert("Invalid Merkle Root");
-        privateBond.burn("", badRoot, NULL_A, bytes32(0), MATURITY, bytes32(uint256(1)));
+        privateBond.burn("", badRoot, nullsIn, commsOut, MATURITY, bytes32(uint256(1)));
     }
 
     function testInvalidRedemptionFlag() public {
         privateBond.mint(0x1de409fb2319657514027650e41731fc3c5b77448fdd2b9aceeda9cf95c499e7, ROOT);
         vm.warp(1893456000);
 
-        vm.expectRevert("Output notes should have 0 value");
-        privateBond.burn("", ROOT, NULL_A, bytes32(0), MATURITY, bytes32(uint256(0)));
+        bytes32[2] memory nullsIn = [NULL_A, NULL_B];
+        bytes32[2] memory commsOut = [bytes32(0), bytes32(0)];
+        vm.expectRevert("Output notes must have 0 value for redemption");
+        privateBond.burn("", ROOT, nullsIn, commsOut, MATURITY, bytes32(uint256(0)));
     }
 
     function testOnlyOwnerCanSwap() public {

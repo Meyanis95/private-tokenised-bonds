@@ -76,19 +76,194 @@ All values stay private. Only hashes, nullifiers, and transaction confirmations 
 
 ## Getting Started
 
-```bash
-# Build contracts
-cd contracts && forge build
+### Prerequisites
 
-# Run tests
+- [Rust](https://rustup.rs/) (for wallet CLI)
+- [Foundry](https://book.getfoundry.sh/getting-started/installation) (for contracts)
+- [Noir](https://noir-lang.org/docs/getting_started/installation/) (for circuits)
+- [Barretenberg](https://github.com/AztecProtocol/aztec-packages/tree/master/barretenberg) (`bb` CLI for proof generation)
+
+### Build Everything
+
+```bash
+# 1. Build and test contracts
+cd contracts
+forge build
 forge test
 
-# Build circuits
-cd ../circuits && nargo build
+# 2. Build circuits
+cd ../circuits
+nargo build
 
-# Test circuits
-cd ../circuits && nargo test
-
-# CLI (coming soon)
-cd ../wallet && cargo run
+# 3. Build wallet CLI
+cd ../wallet
+cargo build --release
 ```
+
+## Demo: Full Bond Lifecycle
+
+This walkthrough demonstrates the complete flow: issuance → purchase → P2P trade → redemption.
+
+### Terminal 1: Start Local Blockchain
+
+```bash
+cd contracts
+anvil
+```
+
+Keep this running. Note the first private key displayed.
+
+### Terminal 2: Deploy Contract
+
+```bash
+cd contracts
+forge script script/PrivateBond.s.sol --rpc-url http://localhost:8545 --broadcast
+```
+
+Note the deployed `PrivateBond` address and update `wallet/src/config.rs` if different.
+
+### Step 1: Issuer Creates Bond Tranche
+
+```bash
+cd wallet
+
+# Issuer onboards with 1000 units
+./target/release/wallet --wallet issuer onboard
+```
+
+This will:
+
+- Generate issuer's shielded keys
+- Create initial bond note (value=1000, maturity=1 year)
+- Mint commitment on-chain
+- Save bond to `data/issuer_bond_*.json`
+
+### Step 2: Alice Registers & Buys Bonds
+
+```bash
+# Alice registers (creates wallet, no bonds yet)
+./target/release/wallet --wallet alice register
+
+# Alice buys 300 units from issuer
+./target/release/wallet --wallet alice buy \
+  --value 300 \
+  --source-note data/issuer_bond_*.json \
+  --issuer-wallet issuer
+```
+
+This will:
+
+- Generate ZK proof (JoinSplit: 1000 → 300 + 700)
+- Call `transfer()` on contract
+- Save Alice's bond to `data/bond_alice_*.json`
+- Save issuer's change note (700 units)
+
+### Step 3: Bob Registers & Trades with Alice
+
+```bash
+# Bob registers
+./target/release/wallet --wallet bob register
+
+# For trade demo, Bob needs a bond first. Buy from issuer's change:
+./target/release/wallet --wallet bob buy \
+  --value 200 \
+  --source-note data/issuer_change_*.json \
+  --issuer-wallet issuer
+
+# Now Alice and Bob can swap their bonds atomically
+./target/release/wallet trade \
+  --wallet-a alice \
+  --bond-a data/bond_alice_*.json \
+  --wallet-b bob \
+  --bond-b data/bond_bob_*.json
+```
+
+This will:
+
+- Generate 2 ZK proofs (one per party)
+- Call `atomicSwap()` with both proofs
+- Save new bonds for each party
+- Create encrypted memos
+
+### Step 4: Bob Redeems at Maturity
+
+For testing, you can warp anvil's time:
+
+```bash
+# In anvil terminal, or use cast:
+cast rpc evm_increaseTime 31536000  # +1 year
+cast rpc evm_mine
+```
+
+Then redeem:
+
+```bash
+./target/release/wallet --wallet bob redeem \
+  --bond data/bond_bob_*.json
+```
+
+This will:
+
+- Verify bond is at maturity
+- Generate burn proof (outputs sum to 0)
+- Call `burn()` on contract
+- Mark bond as redeemed
+
+### Utility Commands
+
+```bash
+# View bond details
+./target/release/wallet info --bond data/bond_alice_*.json
+
+# Scan for encrypted memos sent to you
+./target/release/wallet --wallet alice scan
+```
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                         Wallet CLI                          │
+│  ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────────────┐ │
+│  │ Onboard │  │   Buy   │  │  Trade  │  │     Redeem      │ │
+│  └────┬────┘  └────┬────┘  └────┬────┘  └────────┬────────┘ │
+│       │            │            │                │          │
+│       ▼            ▼            ▼                ▼          │
+│  ┌──────────────────────────────────────────────────────┐   │
+│  │              ZK Proof Generation (Noir)              │   │
+│  └──────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│                    Smart Contract (Solidity)                │
+│  ┌────────┐  ┌──────────┐  ┌────────────┐  ┌─────────────┐  │
+│  │  mint  │  │ transfer │  │ atomicSwap │  │    burn     │  │
+│  └────────┘  └──────────┘  └────────────┘  └─────────────┘  │
+│                                                             │
+│  State: commitments[], nullifiers{}, knownRoots{}           │
+└─────────────────────────────────────────────────────────────┘
+```
+
+## POC Implementation Notes
+
+This repository is a proof-of-concept. The following simplifications were made:
+
+| Spec                                          | POC Implementation                  | Rationale                           |
+| --------------------------------------------- | ----------------------------------- | ----------------------------------- |
+| Merkle tree height 16                         | Height 3 (8 leaves max)             | Faster proof generation for demos   |
+| Whitelist `mapping(address => bool)`          | `onlyOwner` modifier                | Single issuer is sufficient for POC |
+| Deterministic salt `Poseidon(privkey, index)` | Random salt `rand::random()`        | Simpler, no index tracking needed   |
+| Memos stored on-chain                         | Memos stored locally (`data/*.bin`) | Avoids on-chain storage costs       |
+| Client-side memo encryption                   | Relayer encrypts memos              | Trusted relayer model for POC       |
+
+### Known Limitations
+
+- **Tree capacity**: Only 8 notes max (height 3). Production would use height 16-32.
+- **No KYC whitelist**: Any address with contract owner privkey can transact.
+- **Trusted relayer for memos**: Relayer has access to both parties' keys during trade. Production would require client-side encryption before submission.
+- **Single asset type**: All notes share same `assetId`. Multi-asset would require per-asset trees or asset binding in commitments.
+
+## License
+
+MIT

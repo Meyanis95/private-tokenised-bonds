@@ -198,16 +198,35 @@ Private Inputs:
 - Atomic Swap Integrity: Relayer can execute mismatched proofs (wrong assets traded) ❌
   - Mitigation: Both proofs must include a shared intent commitment binding them to the same pair of nullifiers and assets, verified in both constraints
 
+## POC Implementation Notes
+
+This repository is a proof-of-concept. The following simplifications were made:
+
+| Spec | POC Implementation | Rationale |
+|------|-------------------|-----------|
+| Merkle tree height 16 | Height 3 (8 leaves max) | Faster proof generation for demos |
+| Whitelist `mapping(address => bool)` | `onlyOwner` modifier | Single issuer is sufficient for POC |
+| Deterministic salt `Poseidon(privkey, index)` | Random salt `rand::random()` | Simpler, no index tracking needed |
+| Memos stored on-chain | Memos stored locally (`data/*.bin`) | Avoids on-chain storage costs |
+| Client-side memo encryption | Relayer encrypts memos | Trusted relayer model for POC |
+
+### Known Limitations
+
+- **Tree capacity**: Only 8 notes max (height 3). Production would use height 16-32.
+- **No KYC whitelist**: Any address with contract owner privkey can transact.
+- **Trusted relayer for memos**: Relayer has access to both parties' keys during trade. Production would require client-side encryption before submission.
+- **Single asset type**: All notes share same `assetId`. Multi-asset would require per-asset trees or asset binding in commitments.
+
 ## Terminology
 
 - **Note**: Private asset represented by a commitment (value, salt, owner, assetId, maturityDate)
 - **Commitment**: Hash of a note: `Poseidon(value, salt, owner, assetId, maturityDate)`
-- **Salt**: Deterministic for better storage, `Poseidon(private_key, note_index)`
+- **Salt**: Random value for commitment uniqueness (POC uses random; spec suggests deterministic)
 - **Nullifier**: Deterministic identifier for a spent note: `Poseidon(salt, private_key)`
 - **Shielded Key**: User's privacy keypair derived from seed
 - **Merkle Root**: Root hash of the note commitment tree
 - **Proof**: Cryptographic evidence satisfying all constraints without revealing private data
-- **Memo**: Encrypted note details sent on-chain, only recipient can decrypt
-- **Burn Proof**: Redemption proof that spends bond notes without outputs (or with change)
+- **Memo**: Encrypted note details for recipient (stored locally in POC)
+- **Burn Proof**: Redemption proof that spends bond notes with output values = 0
 - **Issuer**: Bond issuer, trusted relayer, and settlement coordinator
 - **Trader**: Investor participant in secondary market trades

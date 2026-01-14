@@ -88,37 +88,44 @@ contract PrivateBond is Ownable {
         return bytes32(hash);
     }
 
-    // Action of burning notes to reedem cash off-chain to the issuer
+    // Action of burning notes to redeem cash off-chain from the issuer
+    // Uses same JoinSplit proof structure as transfer, but with output values = 0
     function burn(
         bytes calldata proof,
         bytes32 root,
-        bytes32 nullifier,
-        bytes32 newCommitment,
+        bytes32[2] calldata nullifiersIn,
+        bytes32[2] calldata commitmentsOut,
         bytes32 inputMaturityDate,
         bytes32 isRedeem
     ) external {
         require(knownRoots[root], "Invalid Merkle Root");
-        require(!nullifiers[nullifier], "Bond already spent");
-        require(block.timestamp >= uint256(inputMaturityDate), "Bond not at maturity yet, cannot be burnt");
-        // If function meant to burn notes, we might need to make sure 
-        // value of the output notes is 0
-        uint256 isRedeemUint = uint256(isRedeem);
-        require(isRedeemUint == 1, "Output notes should have 0 value");
-
-        bytes32[] memory publicInputs = new bytes32[](3); 
-        publicInputs[0] = root;
-        publicInputs[1] = nullifier;
-        publicInputs[2] = newCommitment;
+        require(!nullifiers[nullifiersIn[0]], "Note 0 already spent");
+        require(!nullifiers[nullifiersIn[1]], "Note 1 already spent");
+        require(nullifiersIn[0] != nullifiersIn[1], "Identical nullifiers");
+        require(block.timestamp >= uint256(inputMaturityDate), "Bond not at maturity yet");
         
-        require(verifier.verify(proof, publicInputs), "Invalid Transfer Proof");
+        // Circuit returns true (1) when output values sum to 0 (redemption)
+        uint256 isRedeemUint = uint256(isRedeem);
+        require(isRedeemUint == 1, "Output notes must have 0 value for redemption");
 
-        nullifiers[nullifier] = true;
+        bytes32[] memory publicInputs = new bytes32[](5);
+        publicInputs[0] = root;
+        publicInputs[1] = nullifiersIn[0];
+        publicInputs[2] = nullifiersIn[1];
+        publicInputs[3] = commitmentsOut[0];
+        publicInputs[4] = commitmentsOut[1];
 
-        if (newCommitment != bytes32(0)) {
-            commitments.push(newCommitment);
-            bytes32 newRoot = buildMerkleRoot();
-            knownRoots[newRoot] = true;
-        }
+        require(verifier.verify(proof, publicInputs), "Invalid Burn Proof");
+
+        nullifiers[nullifiersIn[0]] = true;
+        nullifiers[nullifiersIn[1]] = true;
+
+        // For burn, we still add commitments (value=0 notes) to maintain tree structure
+        commitments.push(commitmentsOut[0]);
+        commitments.push(commitmentsOut[1]);
+
+        bytes32 newRoot = buildMerkleRoot();
+        knownRoots[newRoot] = true;
     }
 
     // Don't need to check KYC for now as trusted relayer will be the caller 
