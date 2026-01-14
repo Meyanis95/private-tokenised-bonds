@@ -108,7 +108,7 @@ This walkthrough demonstrates the complete flow: issuance → purchase → P2P t
 
 ```bash
 cd contracts
-anvil
+anvil --disable-code-size-limit
 ```
 
 Keep this running. Note the first private key displayed.
@@ -117,7 +117,7 @@ Keep this running. Note the first private key displayed.
 
 ```bash
 cd contracts
-forge script script/PrivateBond.s.sol --rpc-url http://localhost:8545 --broadcast
+forge script script/PrivateBond.s.sol --rpc-url http://localhost:8545 --broadcast --private-key <PRIVATE_KEY>
 ```
 
 Note the deployed `PrivateBond` address and update `wallet/src/config.rs` if different.
