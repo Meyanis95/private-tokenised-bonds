@@ -1,15 +1,14 @@
 use chrono::Utc;
 use clap::{Parser, Subcommand};
-use ff::PrimeField;
-use num_bigint::BigUint;
-use poseidon_rs::Fr;
 use rand::Rng;
-use serde::{Deserialize, Serialize};
 use std::error::Error;
 use std::fs;
 
 use alloy::{
-    primitives::address, providers::ProviderBuilder, signers::local::PrivateKeySigner, sol,
+    primitives::{address, Bytes},
+    providers::ProviderBuilder,
+    signers::local::PrivateKeySigner,
+    sol,
 };
 
 mod config;
@@ -17,182 +16,19 @@ mod keys;
 mod merkle;
 mod notes;
 mod prover;
+mod utils;
 
 use config::{PRIVATE_BOND_ADDRESS, RPC_URL};
-use merkle::FixedMerkleTree;
-use notes::Note;
-use prover::{build_joinsplit_witness, generate_proof, CircuitNote, MerklePath};
+use prover::{build_joinsplit_witness, generate_proof, CircuitNote};
+use utils::{fr_to_bytes32, format_date, load_bond, load_wallet, TreeState, Bond, Wallet, ensure_data_dir, DATA_DIR};
 
 use crate::keys::ShieldedKeys;
 
+// Contract ABI - minimal interface for the functions we use
 sol!(
     #[sol(rpc)]
     PrivateBond,
-    r#"[
-    {
-      "type": "constructor",
-      "inputs": [
-        { "name": "_verifier", "type": "address", "internalType": "address" },
-        { "name": "initialOwner", "type": "address", "internalType": "address" }
-      ],
-      "stateMutability": "nonpayable"
-    },
-    {
-      "type": "function",
-      "name": "atomicSwap",
-      "inputs": [
-        { "name": "proofA", "type": "bytes", "internalType": "bytes" },
-        {
-          "name": "publicInputsA",
-          "type": "bytes32[]",
-          "internalType": "bytes32[]"
-        },
-        { "name": "proofB", "type": "bytes", "internalType": "bytes" },
-        {
-          "name": "publicInputsB",
-          "type": "bytes32[]",
-          "internalType": "bytes32[]"
-        }
-      ],
-      "outputs": [],
-      "stateMutability": "nonpayable"
-    },
-    {
-      "type": "function",
-      "name": "burn",
-      "inputs": [
-        { "name": "proof", "type": "bytes", "internalType": "bytes" },
-        { "name": "root", "type": "bytes32", "internalType": "bytes32" },
-        { "name": "nullifier", "type": "bytes32", "internalType": "bytes32" },
-        {
-          "name": "newCommitment",
-          "type": "bytes32",
-          "internalType": "bytes32"
-        },
-        {
-          "name": "inputMaturityDate",
-          "type": "bytes32",
-          "internalType": "bytes32"
-        },
-        { "name": "isRedeem", "type": "bytes32", "internalType": "bytes32" }
-      ],
-      "outputs": [],
-      "stateMutability": "nonpayable"
-    },
-    {
-      "type": "function",
-      "name": "commitments",
-      "inputs": [{ "name": "", "type": "uint256", "internalType": "uint256" }],
-      "outputs": [{ "name": "", "type": "bytes32", "internalType": "bytes32" }],
-      "stateMutability": "view"
-    },
-    {
-      "type": "function",
-      "name": "knownRoots",
-      "inputs": [{ "name": "", "type": "bytes32", "internalType": "bytes32" }],
-      "outputs": [{ "name": "", "type": "bool", "internalType": "bool" }],
-      "stateMutability": "view"
-    },
-    {
-      "type": "function",
-      "name": "mint",
-      "inputs": [
-        { "name": "commitment", "type": "bytes32", "internalType": "bytes32" },
-        { "name": "newRoot", "type": "bytes32", "internalType": "bytes32" }
-      ],
-      "outputs": [],
-      "stateMutability": "nonpayable"
-    },
-    {
-      "type": "function",
-      "name": "mintBatch",
-      "inputs": [
-        {
-          "name": "_commitments",
-          "type": "bytes32[]",
-          "internalType": "bytes32[]"
-        }
-      ],
-      "outputs": [],
-      "stateMutability": "nonpayable"
-    },
-    {
-      "type": "function",
-      "name": "nullifiers",
-      "inputs": [{ "name": "", "type": "bytes32", "internalType": "bytes32" }],
-      "outputs": [{ "name": "", "type": "bool", "internalType": "bool" }],
-      "stateMutability": "view"
-    },
-    {
-      "type": "function",
-      "name": "owner",
-      "inputs": [],
-      "outputs": [{ "name": "", "type": "address", "internalType": "address" }],
-      "stateMutability": "view"
-    },
-    {
-      "type": "function",
-      "name": "renounceOwnership",
-      "inputs": [],
-      "outputs": [],
-      "stateMutability": "nonpayable"
-    },
-    {
-      "type": "function",
-      "name": "transferOwnership",
-      "inputs": [
-        { "name": "newOwner", "type": "address", "internalType": "address" }
-      ],
-      "outputs": [],
-      "stateMutability": "nonpayable"
-    },
-    {
-      "type": "function",
-      "name": "verifier",
-      "inputs": [],
-      "outputs": [
-        {
-          "name": "",
-          "type": "address",
-          "internalType": "contract HonkVerifier"
-        }
-      ],
-      "stateMutability": "view"
-    },
-    {
-      "type": "event",
-      "name": "OwnershipTransferred",
-      "inputs": [
-        {
-          "name": "previousOwner",
-          "type": "address",
-          "indexed": true,
-          "internalType": "address"
-        },
-        {
-          "name": "newOwner",
-          "type": "address",
-          "indexed": true,
-          "internalType": "address"
-        }
-      ],
-      "anonymous": false
-    },
-    {
-      "type": "error",
-      "name": "OwnableInvalidOwner",
-      "inputs": [
-        { "name": "owner", "type": "address", "internalType": "address" }
-      ]
-    },
-    {
-      "type": "error",
-      "name": "OwnableUnauthorizedAccount",
-      "inputs": [
-        { "name": "account", "type": "address", "internalType": "address" }
-      ]
-    }
-  ]"#
+    "abi/PrivateBond.abi.json"
 );
 
 #[derive(Parser)]
@@ -208,8 +44,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Initialize wallet: generate seed and keys
+    /// Initialize issuer wallet: generate keys and create initial bond tranche
     Onboard,
+
+    /// Register as a buyer: generate keys only (no bond creation)
+    Register,
 
     /// Buy bond from issuer (splits issuer's note)
     Buy {
@@ -245,99 +84,6 @@ enum Commands {
     },
 }
 
-#[derive(Serialize, Deserialize, Debug)]
-struct Wallet {
-    keys: ShieldedKeys,
-    created_at: String,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-struct Bond {
-    commitment: String,
-    nullifier: String,
-    value: u64,
-    salt: u64,
-    owner: String,
-    asset_id: u64,
-    maturity_date: u64,
-    created_at: String,
-}
-
-/// Tree state file for persisting commitments
-const TREE_STATE_FILE: &str = "tree_state.json";
-
-#[derive(Serialize, Deserialize, Debug, Default)]
-struct TreeState {
-    /// List of commitment strings in insertion order (stored as Fr debug format)
-    commitments: Vec<String>,
-}
-
-impl TreeState {
-    fn load() -> Self {
-        match fs::read_to_string(TREE_STATE_FILE) {
-            Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
-            Err(_) => TreeState::default(),
-        }
-    }
-    
-    fn save(&self) {
-        let _ = fs::write(TREE_STATE_FILE, serde_json::to_string_pretty(self).unwrap());
-    }
-    
-    fn add_commitment(&mut self, commitment_fr: Fr) -> usize {
-        let index = self.commitments.len();
-        // Store as the Fr debug format for consistency
-        self.commitments.push(format!("{}", commitment_fr));
-        self.save();
-        index
-    }
-    
-    fn find_commitment(&self, commitment_str: &str) -> Option<usize> {
-        self.commitments.iter().position(|c| c == commitment_str)
-    }
-    
-    /// Build a merkle tree from stored commitments
-    fn build_tree(&self) -> FixedMerkleTree {
-        let mut tree = FixedMerkleTree::new();
-        for comm_str in &self.commitments {
-            if let Some(fr) = Self::parse_commitment(comm_str) {
-                tree.insert(fr);
-            }
-        }
-        tree
-    }
-    
-    /// Parse commitment string (Fr(0x...) format) to Fr
-    fn parse_commitment(s: &str) -> Option<Fr> {
-        // Strip "Fr(0x" prefix and ")" suffix
-        let clean = s
-            .trim_start_matches("Fr(0x")
-            .trim_start_matches("Fr(")
-            .trim_start_matches("0x")
-            .trim_end_matches(')');
-        
-        // Try parsing as hex
-        if let Ok(bytes) = hex::decode(clean) {
-            if !bytes.is_empty() {
-                // Convert hex bytes to a big number, then to Fr
-                let mut num_bytes = [0u8; 32];
-                let start = if bytes.len() > 32 { bytes.len() - 32 } else { 0 };
-                let copy_start = 32 - std::cmp::min(32, bytes.len());
-                num_bytes[copy_start..].copy_from_slice(&bytes[start..]);
-                
-                // Convert to decimal string for Fr::from_str
-                let result = BigUint::from_bytes_be(&num_bytes);
-                if let Some(fr) = Fr::from_str(&result.to_string()) {
-                    return Some(fr);
-                }
-            }
-        }
-        
-        // Fallback: try parsing as decimal
-        Fr::from_str(clean)
-    }
-}
-
 fn main() -> Result<(), Box<dyn Error>> {
     let cli = Cli::parse();
 
@@ -346,6 +92,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     rt.block_on(async {
         match cli.command {
             Commands::Onboard => onboard(&cli.wallet).await,
+            Commands::Register => register(&cli.wallet),
             Commands::Buy { value, source_note, issuer_wallet } => {
                 buy(&cli.wallet, value, &source_note, &issuer_wallet).await
             }
@@ -361,6 +108,9 @@ fn main() -> Result<(), Box<dyn Error>> {
 async fn onboard(wallet_name: &str) {
     println!("\n🔐 Issuer Onboarding: Creating initial bond tranche...");
 
+    // Ensure data directory exists
+    ensure_data_dir();
+
     // Generate keys for issuer
     let keys = ShieldedKeys::generate();
 
@@ -370,7 +120,7 @@ async fn onboard(wallet_name: &str) {
     };
 
     // Save wallet
-    let filename = format!("{}.json", wallet_name);
+    let filename = format!("{}/{}.json", DATA_DIR, wallet_name);
     match fs::write(&filename, serde_json::to_string_pretty(&wallet).unwrap()) {
         Ok(_) => {
             println!("✅ Issuer wallet created!");
@@ -481,10 +231,44 @@ async fn onboard(wallet_name: &str) {
         created_at: Utc::now().to_rfc3339(),
     };
 
-    let filename = "global_note_tranche.json";
-    match fs::write(filename, serde_json::to_string_pretty(&bond).unwrap()) {
+    let filename = format!("{}/global_note_tranche.json", DATA_DIR);
+    match fs::write(&filename, serde_json::to_string_pretty(&bond).unwrap()) {
         Ok(_) => println!("\n✅ Global note saved to: {}", filename),
         Err(e) => println!("❌ Error saving: {}", e),
+    }
+}
+
+fn register(wallet_name: &str) {
+    println!("\n📋 Registering new wallet...");
+
+    // Ensure data directory exists
+    ensure_data_dir();
+
+    // Check if wallet already exists
+    if load_wallet(wallet_name).is_some() {
+        println!("⚠️  Wallet '{}' already exists", wallet_name);
+        return;
+    }
+
+    // Generate keys
+    let keys = ShieldedKeys::generate();
+
+    let wallet = Wallet {
+        keys: keys.clone(),
+        created_at: Utc::now().to_rfc3339(),
+    };
+
+    // Save wallet
+    let filename = format!("{}/{}.json", DATA_DIR, wallet_name);
+    match fs::write(&filename, serde_json::to_string_pretty(&wallet).unwrap()) {
+        Ok(_) => {
+            println!("✅ Wallet created!");
+            println!("   Saved to: {}", filename);
+            println!("   Public key: {}", keys.public_spending_key_hex);
+        }
+        Err(e) => {
+            println!("❌ Error: {}", e);
+        }
     }
 }
 
@@ -541,8 +325,9 @@ async fn buy(buyer_wallet_name: &str, buy_value: u64, source_note_path: &str, is
         maturity_date: source_bond.maturity_date,
     };
 
-    // 5. Compute nullifier for input note (issuer signs)
+    // 5. Compute nullifiers for input notes (issuer signs)
     let input_nullifier_fr = issuer_wallet.keys.sign_nullifier(source_bond.salt);
+    let dummy_nullifier_fr = issuer_wallet.keys.sign_nullifier(0); // Dummy note has salt=0
     
     // Debug: verify nullifier computation uses the same private key
     let private_key_debug = issuer_wallet.keys.get_private_spending_key();
@@ -660,18 +445,81 @@ async fn buy(buyer_wallet_name: &str, buy_value: u64, source_note_path: &str, is
 
     // 10. Generate proof
     println!("\n🔐 Generating ZK proof...");
-    match generate_proof(circuit_dir, "circuits").await {
-        Ok(proof_path) => {
-            println!("   ✅ Proof saved to: {}", proof_path);
+    let proof_result = generate_proof(circuit_dir, "circuits").await;
+    let proof_path = match &proof_result {
+        Ok(path) => {
+            println!("   ✅ Proof saved to: {}", path);
+            Some(path.clone())
         }
         Err(e) => {
             println!("   ⚠️  Proof generation failed: {}", e);
             println!("   ℹ️  You can run manually:");
             println!("      cd {} && nargo execute circuits && bb prove -b ./target/circuits.json -w ./target/circuits -o ./target", circuit_dir);
+            None
+        }
+    };
+
+    // 11. Call contract transfer() with proof
+    if let Some(ref proof_file) = proof_path {
+        println!("\n📡 Calling contract transfer()...");
+        
+        // Read proof bytes
+        let proof_bytes = match fs::read(proof_file) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                println!("   ❌ Failed to read proof file: {}", e);
+                return;
+            }
+        };
+
+        // Convert Fr values to bytes32
+        let root_bytes = fr_to_bytes32(&merkle_root);
+        let nullifier0_bytes = fr_to_bytes32(&input_nullifier_fr);
+        let nullifier1_bytes = fr_to_bytes32(&dummy_nullifier_fr);
+        let commitment0_bytes = fr_to_bytes32(&buyer_commitment_fr);
+        let commitment1_bytes = fr_to_bytes32(&change_commitment_fr);
+
+        // Setup provider with signer (use anvil's first account for now)
+        let signer: PrivateKeySigner = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+            .parse()
+            .expect("valid private key");
+        let provider = ProviderBuilder::new()
+            .wallet(signer)
+            .connect(RPC_URL).await.expect("Failed to configure provider");
+        
+
+        let contract_address = PRIVATE_BOND_ADDRESS.parse().expect("valid contract address");
+        let contract = PrivateBond::new(contract_address, provider);
+
+        // Call transfer()
+        match contract
+            .transfer(
+                Bytes::from(proof_bytes),
+                root_bytes,
+                [nullifier0_bytes, nullifier1_bytes],
+                [commitment0_bytes, commitment1_bytes],
+            )
+            .send()
+            .await
+        {
+            Ok(pending) => {
+                match pending.watch().await {
+                    Ok(tx_hash) => {
+                        println!("   ✅ Transaction confirmed: {:?}", tx_hash);
+                    }
+                    Err(e) => {
+                        println!("   ⚠️  Transaction pending but watch failed: {}", e);
+                    }
+                }
+            }
+            Err(e) => {
+                println!("   ❌ Contract call failed: {}", e);
+                println!("   ℹ️  Make sure anvil is running and contract is deployed");
+            }
         }
     }
 
-    // 11. Save buyer's bond
+    // 12. Save buyer's bond
     let buyer_bond = Bond {
         commitment: format!("{}", buyer_commitment_fr),
         nullifier: format!("{}", buyer_wallet.keys.sign_nullifier(buyer_salt)),
@@ -683,7 +531,7 @@ async fn buy(buyer_wallet_name: &str, buy_value: u64, source_note_path: &str, is
         created_at: Utc::now().to_rfc3339(),
     };
 
-    let buyer_filename = format!("bond_{}_{}.json", buyer_wallet_name, &format!("{:016x}", buyer_salt)[..8]);
+    let buyer_filename = format!("{}/bond_{}_{}.json", DATA_DIR, buyer_wallet_name, &format!("{:016x}", buyer_salt)[..8]);
     match fs::write(&buyer_filename, serde_json::to_string_pretty(&buyer_bond).unwrap()) {
         Ok(_) => println!("\n✅ Buyer bond saved to: {}", buyer_filename),
         Err(e) => println!("❌ Error saving buyer bond: {}", e),
@@ -701,21 +549,16 @@ async fn buy(buyer_wallet_name: &str, buy_value: u64, source_note_path: &str, is
         created_at: Utc::now().to_rfc3339(),
     };
 
-    let change_filename = format!("issuer_change_{}.json", &format!("{:016x}", change_salt)[..8]);
+    let change_filename = format!("{}/issuer_change_{}.json", DATA_DIR, &format!("{:016x}", change_salt)[..8]);
     match fs::write(&change_filename, serde_json::to_string_pretty(&change_bond).unwrap()) {
         Ok(_) => println!("✅ Issuer change note saved to: {}", change_filename),
         Err(e) => println!("❌ Error saving change note: {}", e),
     }
 
-    // 13. Add new commitments to tree state (for future transactions)
+    // 14. Add new commitments to tree state (for future transactions)
     tree_state.add_commitment(buyer_commitment_fr.clone());
     tree_state.add_commitment(change_commitment_fr.clone());
     println!("   📝 Added 2 new commitments to merkle tree");
-
-    println!("\n📝 Contract call info:");
-    println!("   Function: burn(proof, root, nullifier, [newCommitment1, newCommitment2], maturityDate, isRedeem=false)");
-    println!("   Address:  {}", PRIVATE_BOND_ADDRESS);
-    println!("   Status:   ℹ️  Ready for Task 5 (contract integration)");
 }
 
 async fn trade(_wallet_name: &str, bond_a_path: &str, bond_b_path: &str) {
@@ -827,36 +670,5 @@ fn info(bond_path: &str) {
     } else {
         let days = (bond.maturity_date - now) / 86400;
         println!("   Status:     🟢 {} days remaining", days);
-    }
-}
-
-fn load_wallet(wallet_name: &str) -> Option<Wallet> {
-    let filename = format!("{}.json", wallet_name);
-    match fs::read_to_string(&filename) {
-        Ok(content) => serde_json::from_str(&content).ok(),
-        Err(_) => None,
-    }
-}
-
-fn load_bond(path: &str) -> Option<Bond> {
-    match fs::read_to_string(path) {
-        Ok(content) => match serde_json::from_str(&content) {
-            Ok(bond) => Some(bond),
-            Err(e) => {
-                println!("❌ Error parsing bond: {}", e);
-                None
-            }
-        },
-        Err(e) => {
-            println!("❌ Error reading bond: {}", e);
-            None
-        }
-    }
-}
-
-fn format_date(ts: u64) -> String {
-    match chrono::DateTime::from_timestamp(ts as i64, 0) {
-        Some(dt) => dt.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
-        None => format!("{} (invalid)", ts),
     }
 }

@@ -22,6 +22,36 @@ contract PrivateBond is Ownable {
         knownRoots[newRoot] = true;
     }
 
+    function transfer(
+        bytes calldata proof,
+        bytes32 root,
+        bytes32[2] calldata nullifiersIn,
+        bytes32[2] calldata commitmentsOut
+    ) external {
+        require(knownRoots[root], "Invalid Merkle Root");
+        require(!nullifiers[nullifiersIn[0]], "Note 0 already spent");
+        require(!nullifiers[nullifiersIn[1]], "Note 1 already spent");
+        require(nullifiersIn[0] != nullifiersIn[1], "Identical nullifiers");
+
+        bytes32[] memory publicInputs = new bytes32[](5);
+        publicInputs[0] = root;
+        publicInputs[1] = nullifiersIn[0];
+        publicInputs[2] = nullifiersIn[1];
+        publicInputs[3] = commitmentsOut[0];
+        publicInputs[4] = commitmentsOut[1];
+
+        require(verifier.verify(proof, publicInputs), "Invalid Transfer Proof");
+
+        nullifiers[nullifiersIn[0]] = true;
+        nullifiers[nullifiersIn[1]] = true;
+
+        commitments.push(commitmentsOut[0]);
+        commitments.push(commitmentsOut[1]);
+
+        bytes32 newRoot = buildMerkleRoot();
+        knownRoots[newRoot] = true;
+    }
+
     // Enables minting all the bonds at once
     function mintBatch(bytes32[] memory _commitments) external onlyOwner {
         for (uint32 i = 0; i < _commitments.length; i++) {

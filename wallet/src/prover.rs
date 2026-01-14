@@ -87,12 +87,18 @@ impl WitnessBuilder {
 
     /// Convert Fr to hex string format for Prover.toml
     fn fr_to_hex(fr: &Fr) -> String {
-        // Fr's Display impl gives us the decimal representation
-        // We need to convert it to hex format "0x..."
+        // Fr's repr is [u64; 4] in little-endian limb order
         let repr = fr.into_repr();
-        let bytes = repr.as_ref();
+        let limbs: &[u64] = repr.as_ref();
 
-        // Convert bytes to hex (big-endian for consistency)
+        // Convert limbs to bytes (little-endian limbs, little-endian bytes within each limb)
+        let mut bytes = [0u8; 32];
+        for (i, limb) in limbs.iter().enumerate() {
+            let limb_bytes = limb.to_le_bytes();
+            bytes[i * 8..(i + 1) * 8].copy_from_slice(&limb_bytes);
+        }
+
+        // Convert to big-endian hex string
         let mut hex = String::from("0x");
         for &byte in bytes.iter().rev() {
             hex.push_str(&format!("{:02x}", byte));
