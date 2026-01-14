@@ -20,15 +20,18 @@ mod utils;
 
 use config::{PRIVATE_BOND_ADDRESS, RPC_URL};
 use prover::{build_joinsplit_witness, generate_proof, CircuitNote};
-use utils::{fr_to_bytes32, format_date, load_bond, load_wallet, TreeState, Bond, Wallet, ensure_data_dir, DATA_DIR};
+use utils::{
+    ensure_data_dir, format_date, fr_to_bytes32, load_bond, load_wallet, Bond, TreeState, Wallet,
+    DATA_DIR,
+};
 
 use crate::keys::ShieldedKeys;
 
-// Contract ABI - minimal interface for the functions we use
+// Contract ABI - loaded from Foundry compilation output
 sol!(
-    #[sol(rpc)]
+    #[sol(rpc, ignore_unlinked)]
     PrivateBond,
-    "abi/PrivateBond.abi.json"
+    "../contracts/out/PrivateBond.sol/PrivateBond.json"
 );
 
 #[derive(Parser)]
@@ -93,9 +96,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         match cli.command {
             Commands::Onboard => onboard(&cli.wallet).await,
             Commands::Register => register(&cli.wallet),
-            Commands::Buy { value, source_note, issuer_wallet } => {
-                buy(&cli.wallet, value, &source_note, &issuer_wallet).await
-            }
+            Commands::Buy {
+                value,
+                source_note,
+                issuer_wallet,
+            } => buy(&cli.wallet, value, &source_note, &issuer_wallet).await,
             Commands::Trade { bond_a, bond_b } => trade(&cli.wallet, &bond_a, &bond_b).await,
             Commands::Redeem { bond } => redeem(&cli.wallet, &bond).await,
             Commands::Info { bond } => info(&bond),
@@ -205,7 +210,7 @@ async fn onboard(wallet_name: &str) {
     let mut tree_state = TreeState::load();
     let leaf_index = tree_state.add_commitment(commitment);
     println!("   Added real note to merkle tree at index: {}", leaf_index);
-    
+
     // Also add the dummy note (value=0, salt=0, same owner) to the tree
     // This is required because the circuit verifies merkle proofs for both inputs
     let dummy_note = CircuitNote {
@@ -217,7 +222,10 @@ async fn onboard(wallet_name: &str) {
     };
     let dummy_commitment = dummy_note.commitment();
     let dummy_index = tree_state.add_commitment(dummy_commitment);
-    println!("   Added dummy note to merkle tree at index: {}", dummy_index);
+    println!(
+        "   Added dummy note to merkle tree at index: {}",
+        dummy_index
+    );
 
     // Save the global note as initial bond
     let bond = Bond {
@@ -272,7 +280,12 @@ fn register(wallet_name: &str) {
     }
 }
 
-async fn buy(buyer_wallet_name: &str, buy_value: u64, source_note_path: &str, issuer_wallet_path: &str) {
+async fn buy(
+    buyer_wallet_name: &str,
+    buy_value: u64,
+    source_note_path: &str,
+    issuer_wallet_path: &str,
+) {
     println!("\n💳 Buying bond from issuer...");
     println!("   Buy amount: {}", buy_value);
 
@@ -280,7 +293,10 @@ async fn buy(buyer_wallet_name: &str, buy_value: u64, source_note_path: &str, is
     let buyer_wallet = match load_wallet(buyer_wallet_name) {
         Some(w) => w,
         None => {
-            println!("❌ Buyer wallet '{}' not found. Run 'onboard' first.", buyer_wallet_name);
+            println!(
+                "❌ Buyer wallet '{}' not found. Run 'onboard' first.",
+                buyer_wallet_name
+            );
             return;
         }
     };
@@ -305,14 +321,24 @@ async fn buy(buyer_wallet_name: &str, buy_value: u64, source_note_path: &str, is
 
     // Validate: buy value must be less than source note value
     if buy_value >= source_bond.value {
-        println!("❌ Buy value ({}) must be less than source note value ({}).", buy_value, source_bond.value);
+        println!(
+            "❌ Buy value ({}) must be less than source note value ({}).",
+            buy_value, source_bond.value
+        );
         return;
     }
 
     let change_value = source_bond.value - buy_value;
-    println!("   Source note: {} (value={})", source_note_path, source_bond.value);
+    println!(
+        "   Source note: {} (value={})",
+        source_note_path, source_bond.value
+    );
     println!("   Change to issuer: {}", change_value);
-    println!("   Maturity: {} ({})", source_bond.maturity_date, format_date(source_bond.maturity_date));
+    println!(
+        "   Maturity: {} ({})",
+        source_bond.maturity_date,
+        format_date(source_bond.maturity_date)
+    );
 
     // 4. Create INPUT note (issuer's note being consumed)
     let issuer_owner_fr = issuer_wallet.keys.public_spending_key();
@@ -328,15 +354,18 @@ async fn buy(buyer_wallet_name: &str, buy_value: u64, source_note_path: &str, is
     // 5. Compute nullifiers for input notes (issuer signs)
     let input_nullifier_fr = issuer_wallet.keys.sign_nullifier(source_bond.salt);
     let dummy_nullifier_fr = issuer_wallet.keys.sign_nullifier(0); // Dummy note has salt=0
-    
+
     // Debug: verify nullifier computation uses the same private key
     let private_key_debug = issuer_wallet.keys.get_private_spending_key();
-    println!("   DEBUG: salt={}, private_key={}", source_bond.salt, private_key_debug);
+    println!(
+        "   DEBUG: salt={}, private_key={}",
+        source_bond.salt, private_key_debug
+    );
     println!("   DEBUG: computed nullifier={}", input_nullifier_fr);
 
     // 6. Create OUTPUT notes
     let mut rng = rand::thread_rng();
-    
+
     // Output 1: Buyer's note
     let buyer_salt = rng.gen::<u64>();
     let buyer_owner_fr = buyer_wallet.keys.public_spending_key();
@@ -364,13 +393,22 @@ async fn buy(buyer_wallet_name: &str, buy_value: u64, source_note_path: &str, is
     let change_commitment_fr = change_note.commitment();
 
     println!("\n📊 JoinSplit Summary:");
-    println!("   INPUT:  value={}, nullifier={}", source_bond.value, input_nullifier_fr);
-    println!("   OUTPUT1 (buyer):  value={}, commitment={}", buy_value, buyer_commitment_fr);
-    println!("   OUTPUT2 (change): value={}, commitment={}", change_value, change_commitment_fr);
+    println!(
+        "   INPUT:  value={}, nullifier={}",
+        source_bond.value, input_nullifier_fr
+    );
+    println!(
+        "   OUTPUT1 (buyer):  value={}, commitment={}",
+        buy_value, buyer_commitment_fr
+    );
+    println!(
+        "   OUTPUT2 (change): value={}, commitment={}",
+        change_value, change_commitment_fr
+    );
 
     // 8. Build merkle tree and generate proofs for both input notes
     let mut tree_state = TreeState::load();
-    
+
     // Find the source note's commitment in the tree (should be at index 0)
     let source_commitment_str = &source_bond.commitment;
     let real_note_index = match tree_state.find_commitment(source_commitment_str) {
@@ -382,7 +420,7 @@ async fn buy(buyer_wallet_name: &str, buy_value: u64, source_note_path: &str, is
             return;
         }
     };
-    
+
     // Create dummy note (value=0, salt=0) and find its commitment (should be at index 1)
     let dummy_note = CircuitNote {
         value: 0,
@@ -393,7 +431,7 @@ async fn buy(buyer_wallet_name: &str, buy_value: u64, source_note_path: &str, is
     };
     let dummy_commitment = dummy_note.commitment();
     let dummy_commitment_str = format!("{}", dummy_commitment);
-    
+
     let dummy_note_index = match tree_state.find_commitment(&dummy_commitment_str) {
         Some(idx) => idx,
         None => {
@@ -403,16 +441,16 @@ async fn buy(buyer_wallet_name: &str, buy_value: u64, source_note_path: &str, is
             return;
         }
     };
-    
+
     println!("   Real note at tree index: {}", real_note_index);
     println!("   Dummy note at tree index: {}", dummy_note_index);
-    
+
     // Build the merkle tree and generate proofs for BOTH notes
     let tree = tree_state.build_tree();
     let merkle_root = tree.root();
     let real_note_path = tree.generate_proof(real_note_index);
     let dummy_note_path = tree.generate_proof(dummy_note_index);
-    
+
     println!("   Merkle root: {}", merkle_root);
     println!("   Real note path_indices: {:?}", real_note_path.indices);
     println!("   Dummy note path_indices: {:?}", dummy_note_path.indices);
@@ -462,7 +500,7 @@ async fn buy(buyer_wallet_name: &str, buy_value: u64, source_note_path: &str, is
     // 11. Call contract transfer() with proof
     if let Some(ref proof_file) = proof_path {
         println!("\n📡 Calling contract transfer()...");
-        
+
         // Read proof bytes
         let proof_bytes = match fs::read(proof_file) {
             Ok(bytes) => bytes,
@@ -480,15 +518,19 @@ async fn buy(buyer_wallet_name: &str, buy_value: u64, source_note_path: &str, is
         let commitment1_bytes = fr_to_bytes32(&change_commitment_fr);
 
         // Setup provider with signer (use anvil's first account for now)
-        let signer: PrivateKeySigner = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
-            .parse()
-            .expect("valid private key");
+        let signer: PrivateKeySigner =
+            "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+                .parse()
+                .expect("valid private key");
         let provider = ProviderBuilder::new()
             .wallet(signer)
-            .connect(RPC_URL).await.expect("Failed to configure provider");
-        
+            .connect(RPC_URL)
+            .await
+            .expect("Failed to configure provider");
 
-        let contract_address = PRIVATE_BOND_ADDRESS.parse().expect("valid contract address");
+        let contract_address = PRIVATE_BOND_ADDRESS
+            .parse()
+            .expect("valid contract address");
         let contract = PrivateBond::new(contract_address, provider);
 
         // Call transfer()
@@ -502,16 +544,14 @@ async fn buy(buyer_wallet_name: &str, buy_value: u64, source_note_path: &str, is
             .send()
             .await
         {
-            Ok(pending) => {
-                match pending.watch().await {
-                    Ok(tx_hash) => {
-                        println!("   ✅ Transaction confirmed: {:?}", tx_hash);
-                    }
-                    Err(e) => {
-                        println!("   ⚠️  Transaction pending but watch failed: {}", e);
-                    }
+            Ok(pending) => match pending.watch().await {
+                Ok(tx_hash) => {
+                    println!("   ✅ Transaction confirmed: {:?}", tx_hash);
                 }
-            }
+                Err(e) => {
+                    println!("   ⚠️  Transaction pending but watch failed: {}", e);
+                }
+            },
             Err(e) => {
                 println!("   ❌ Contract call failed: {}", e);
                 println!("   ℹ️  Make sure anvil is running and contract is deployed");
@@ -531,8 +571,16 @@ async fn buy(buyer_wallet_name: &str, buy_value: u64, source_note_path: &str, is
         created_at: Utc::now().to_rfc3339(),
     };
 
-    let buyer_filename = format!("{}/bond_{}_{}.json", DATA_DIR, buyer_wallet_name, &format!("{:016x}", buyer_salt)[..8]);
-    match fs::write(&buyer_filename, serde_json::to_string_pretty(&buyer_bond).unwrap()) {
+    let buyer_filename = format!(
+        "{}/bond_{}_{}.json",
+        DATA_DIR,
+        buyer_wallet_name,
+        &format!("{:016x}", buyer_salt)[..8]
+    );
+    match fs::write(
+        &buyer_filename,
+        serde_json::to_string_pretty(&buyer_bond).unwrap(),
+    ) {
         Ok(_) => println!("\n✅ Buyer bond saved to: {}", buyer_filename),
         Err(e) => println!("❌ Error saving buyer bond: {}", e),
     }
@@ -549,8 +597,15 @@ async fn buy(buyer_wallet_name: &str, buy_value: u64, source_note_path: &str, is
         created_at: Utc::now().to_rfc3339(),
     };
 
-    let change_filename = format!("{}/issuer_change_{}.json", DATA_DIR, &format!("{:016x}", change_salt)[..8]);
-    match fs::write(&change_filename, serde_json::to_string_pretty(&change_bond).unwrap()) {
+    let change_filename = format!(
+        "{}/issuer_change_{}.json",
+        DATA_DIR,
+        &format!("{:016x}", change_salt)[..8]
+    );
+    match fs::write(
+        &change_filename,
+        serde_json::to_string_pretty(&change_bond).unwrap(),
+    ) {
         Ok(_) => println!("✅ Issuer change note saved to: {}", change_filename),
         Err(e) => println!("❌ Error saving change note: {}", e),
     }
