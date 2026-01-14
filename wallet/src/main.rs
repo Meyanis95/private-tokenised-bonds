@@ -1,11 +1,13 @@
 use chrono::Utc;
 use clap::{Parser, Subcommand};
+use ff::PrimeField;
+use poseidon_rs::Fr;
 use rand::Rng;
 use std::error::Error;
 use std::fs;
 
 use alloy::{
-    primitives::{address, Bytes},
+    primitives::{address, Bytes, FixedBytes},
     providers::ProviderBuilder,
     signers::local::PrivateKeySigner,
     sol,
@@ -19,6 +21,7 @@ mod prover;
 mod utils;
 
 use config::{PRIVATE_BOND_ADDRESS, RPC_URL};
+use notes::Note;
 use prover::{build_joinsplit_witness, generate_proof, CircuitNote};
 use utils::{
     ensure_data_dir, format_date, fr_to_bytes32, load_bond, load_wallet, Bond, TreeState, Wallet,
@@ -66,10 +69,18 @@ enum Commands {
         issuer_wallet: String,
     },
 
-    /// Trade: swap two bonds P2P
+    /// Trade: swap two bonds P2P (atomic swap)
     Trade {
+        /// Wallet A name (owner of bond_a)
+        #[arg(long)]
+        wallet_a: String,
+        /// Path to bond A (will go to wallet B)
         #[arg(long)]
         bond_a: String,
+        /// Wallet B name (owner of bond_b)
+        #[arg(long)]
+        wallet_b: String,
+        /// Path to bond B (will go to wallet A)
         #[arg(long)]
         bond_b: String,
     },
@@ -84,6 +95,13 @@ enum Commands {
     Info {
         #[arg(long)]
         bond: String,
+    },
+
+    /// Scan: decrypt memos sent to this wallet
+    Scan {
+        /// Optional: sender wallet name (to derive pubkey for decryption)
+        #[arg(long)]
+        sender: Option<String>,
     },
 }
 
@@ -101,9 +119,12 @@ fn main() -> Result<(), Box<dyn Error>> {
                 source_note,
                 issuer_wallet,
             } => buy(&cli.wallet, value, &source_note, &issuer_wallet).await,
-            Commands::Trade { bond_a, bond_b } => trade(&cli.wallet, &bond_a, &bond_b).await,
+            Commands::Trade { wallet_a, bond_a, wallet_b, bond_b } => {
+                trade(&wallet_a, &bond_a, &wallet_b, &bond_b).await
+            }
             Commands::Redeem { bond } => redeem(&cli.wallet, &bond).await,
             Commands::Info { bond } => info(&bond),
+            Commands::Scan { sender } => scan(&cli.wallet, sender.as_deref()),
         }
     });
 
@@ -585,7 +606,28 @@ async fn buy(
         Err(e) => println!("❌ Error saving buyer bond: {}", e),
     }
 
-    // 12. Save issuer's change note (update source)
+    // 13. Encrypt memo for issuer audit (issuer can decrypt with their viewing key)
+    let buyer_note = Note {
+        value: buy_value,
+        salt: buyer_salt,
+        owner: buyer_salt, // Use salt as owner identifier for Note struct
+        asset_id: source_bond.asset_id,
+        maturity_date: source_bond.maturity_date,
+    };
+    
+    // Encrypt buyer's note so issuer can audit
+    match Note::encrypt(&buyer_wallet.keys, issuer_wallet.keys.public_viewing_key(), &buyer_note) {
+        Ok(memo) => {
+            let memo_filename = format!("{}/memo_{}_{}.bin", DATA_DIR, buyer_wallet_name, &format!("{:016x}", buyer_salt)[..8]);
+            match fs::write(&memo_filename, &memo.ciphertext) {
+                Ok(_) => println!("🔒 Encrypted memo saved to: {}", memo_filename),
+                Err(e) => println!("⚠️  Failed to save memo: {}", e),
+            }
+        }
+        Err(e) => println!("⚠️  Memo encryption failed: {}", e),
+    }
+
+    // 14. Save issuer's change note (update source)
     let change_bond = Bond {
         commitment: format!("{}", change_commitment_fr),
         nullifier: format!("{}", issuer_wallet.keys.sign_nullifier(change_salt)),
@@ -616,31 +658,49 @@ async fn buy(
     println!("   📝 Added 2 new commitments to merkle tree");
 }
 
-async fn trade(_wallet_name: &str, bond_a_path: &str, bond_b_path: &str) {
-    println!("\n🔄 Trading bonds...");
+async fn trade(wallet_a_name: &str, bond_a_path: &str, wallet_b_name: &str, bond_b_path: &str) {
+    println!("\n🔄 Atomic trade between {} and {}...", wallet_a_name, wallet_b_name);
 
+    // 1. Load both wallets
+    let wallet_a = match load_wallet(wallet_a_name) {
+        Some(w) => w,
+        None => {
+            println!("❌ Wallet A '{}' not found", wallet_a_name);
+            return;
+        }
+    };
+    let wallet_b = match load_wallet(wallet_b_name) {
+        Some(w) => w,
+        None => {
+            println!("❌ Wallet B '{}' not found", wallet_b_name);
+            return;
+        }
+    };
+
+    // 2. Load both bonds
     let bond_a = match load_bond(bond_a_path) {
         Some(b) => b,
         None => return,
     };
-
     let bond_b = match load_bond(bond_b_path) {
         Some(b) => b,
         None => return,
     };
 
     println!(
-        "   Bond A: {} (value: {})",
+        "   Party A ({}) gives: {} (value: {})",
+        wallet_a_name,
         &bond_a.commitment[..12],
         bond_a.value
     );
     println!(
-        "   Bond B: {} (value: {})",
+        "   Party B ({}) gives: {} (value: {})",
+        wallet_b_name,
         &bond_b.commitment[..12],
         bond_b.value
     );
 
-    // Check maturity
+    // 3. Check maturity for both bonds
     let now = Utc::now().timestamp() as u64;
     if now >= bond_a.maturity_date {
         println!("❌ Bond A at/past maturity - cannot trade");
@@ -651,22 +711,340 @@ async fn trade(_wallet_name: &str, bond_a_path: &str, bond_b_path: &str) {
         return;
     }
 
-    // Check different nullifiers
+    // 4. Check different nullifiers
     if bond_a.nullifier == bond_b.nullifier {
         println!("❌ Cannot trade: identical nullifiers!");
         return;
     }
 
-    println!("\n✅ Trade valid!");
-    println!("   Nullifier A marked spent: {}", bond_a.nullifier);
-    println!("   Nullifier B marked spent: {}", bond_b.nullifier);
-    println!("   New commitments generated for outputs");
+    // 5. Verify ownership
+    if bond_a.owner != wallet_a.keys.public_spending_key_hex {
+        println!("❌ Wallet A doesn't own bond A");
+        return;
+    }
+    if bond_b.owner != wallet_b.keys.public_spending_key_hex {
+        println!("❌ Wallet B doesn't own bond B");
+        return;
+    }
 
-    println!("\n📝 Contract call info:");
-    println!("   Function: atomicSwap(proofA, inputsA, proofB, inputsB)");
-    println!("   Address:  {}", PRIVATE_BOND_ADDRESS);
-    println!("   RPC:      {}", RPC_URL);
-    println!("   Status:   ℹ️  Proof generation needed before on-chain call");
+    println!("\n✅ Trade validation passed");
+
+    // 6. Load merkle tree
+    let mut tree_state = TreeState::load();
+    let tree = tree_state.build_tree();
+    let merkle_root = tree.root();
+
+    // Find both notes in tree
+    let index_a = match tree_state.find_commitment(&bond_a.commitment) {
+        Some(idx) => idx,
+        None => {
+            println!("❌ Bond A commitment not found in merkle tree");
+            return;
+        }
+    };
+    let index_b = match tree_state.find_commitment(&bond_b.commitment) {
+        Some(idx) => idx,
+        None => {
+            println!("❌ Bond B commitment not found in merkle tree");
+            return;
+        }
+    };
+
+    println!("   Bond A at tree index: {}", index_a);
+    println!("   Bond B at tree index: {}", index_b);
+
+    // 7. Prepare new output notes (A's bond → B, B's bond → A)
+    let new_salt_a_to_b: u64 = rand::random();
+    let new_salt_b_to_a: u64 = rand::random();
+
+    // Derive owner field from public keys
+    let owner_a_bytes = hex::decode(&wallet_a.keys.public_spending_key_hex).unwrap_or_default();
+    let owner_a_fr = Fr::from_str(&u64::from_be_bytes(
+        owner_a_bytes.get(0..8).unwrap_or(&[0u8; 8]).try_into().unwrap()
+    ).to_string()).unwrap();
+    
+    let owner_b_bytes = hex::decode(&wallet_b.keys.public_spending_key_hex).unwrap_or_default();
+    let owner_b_fr = Fr::from_str(&u64::from_be_bytes(
+        owner_b_bytes.get(0..8).unwrap_or(&[0u8; 8]).try_into().unwrap()
+    ).to_string()).unwrap();
+
+    // Output from A's input → goes to B (same value/maturity as A's bond)
+    let output_to_b = CircuitNote {
+        value: bond_a.value,
+        salt: new_salt_a_to_b,
+        owner: owner_b_fr.clone(),
+        asset_id: bond_a.asset_id,
+        maturity_date: bond_a.maturity_date,
+    };
+    let commitment_to_b = output_to_b.commitment();
+
+    // Output from B's input → goes to A (same value/maturity as B's bond)
+    let output_to_a = CircuitNote {
+        value: bond_b.value,
+        salt: new_salt_b_to_a,
+        owner: owner_a_fr.clone(),
+        asset_id: bond_b.asset_id,
+        maturity_date: bond_b.maturity_date,
+    };
+    let commitment_to_a = output_to_a.commitment();
+
+    println!("\n📝 Trade outputs:");
+    println!("   A→B: value={}, commitment={}", bond_a.value, commitment_to_b);
+    println!("   B→A: value={}, commitment={}", bond_b.value, commitment_to_a);
+
+    // 8. Build proofs for both transfers
+    // Proof A: A spends their note, creates output for B (+ dummy for change slot)
+    // Proof B: B spends their note, creates output for A (+ dummy for change slot)
+
+    let path_a = tree.generate_proof(index_a);
+    let path_b = tree.generate_proof(index_b);
+
+    // Create input notes
+    let input_a = CircuitNote {
+        value: bond_a.value,
+        salt: bond_a.salt,
+        owner: owner_a_fr.clone(),
+        asset_id: bond_a.asset_id,
+        maturity_date: bond_a.maturity_date,
+    };
+    let input_b = CircuitNote {
+        value: bond_b.value,
+        salt: bond_b.salt,
+        owner: owner_b_fr.clone(),
+        asset_id: bond_b.asset_id,
+        maturity_date: bond_b.maturity_date,
+    };
+
+    // Nullifiers
+    let nullifier_a = wallet_a.keys.sign_nullifier(bond_a.salt);
+    let nullifier_b = wallet_b.keys.sign_nullifier(bond_b.salt);
+
+    // Dummy notes for the second output slot (value=0)
+    let dummy_output = CircuitNote {
+        value: 0,
+        salt: 0,
+        owner: Fr::from_str("0").unwrap(),
+        asset_id: bond_a.asset_id,
+        maturity_date: bond_a.maturity_date,
+    };
+    let dummy_commitment = dummy_output.commitment();
+
+    // Find dummy note in tree (should exist from onboard)
+    let dummy_index = match tree_state.find_commitment(&format!("{}", dummy_commitment)) {
+        Some(idx) => idx,
+        None => {
+            println!("❌ Dummy note not found in merkle tree");
+            return;
+        }
+    };
+    let dummy_path = tree.generate_proof(dummy_index);
+    let _dummy_nullifier = Fr::from_str("0").unwrap(); // Dummy nullifier (unused in proof)
+
+    // 9. Generate Proof A (A spends → B receives)
+    println!("\n🔐 Generating proof A ({}→{})...", wallet_a_name, wallet_b_name);
+    let witness_a = build_joinsplit_witness(
+        merkle_root.clone(),
+        input_a.clone(),
+        path_a,
+        nullifier_a.clone(),
+        dummy_output.clone(),
+        dummy_path.clone(),
+        [output_to_b.clone(), dummy_output.clone()],
+        [commitment_to_b.clone(), dummy_commitment.clone()],
+        wallet_a.keys.get_private_spending_key(),
+    );
+
+    let circuit_dir = "../circuits";
+    if let Err(e) = witness_a.write_prover_toml(circuit_dir) {
+        println!("❌ Failed to write witness A: {}", e);
+        return;
+    }
+
+    let proof_a_result = generate_proof(circuit_dir, "circuits").await;
+    let proof_a_bytes = match proof_a_result {
+        Ok(path) => {
+            println!("   ✅ Proof A generated");
+            match fs::read(&path) {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    println!("❌ Failed to read proof A: {}", e);
+                    return;
+                }
+            }
+        }
+        Err(e) => {
+            println!("❌ Proof A generation failed: {}", e);
+            return;
+        }
+    };
+
+    // 10. Generate Proof B (B spends → A receives)
+    println!("\n� Generating proof B ({}→{})...", wallet_b_name, wallet_a_name);
+    let witness_b = build_joinsplit_witness(
+        merkle_root.clone(),
+        input_b.clone(),
+        path_b,
+        nullifier_b.clone(),
+        dummy_output.clone(),
+        dummy_path.clone(),
+        [output_to_a.clone(), dummy_output.clone()],
+        [commitment_to_a.clone(), dummy_commitment.clone()],
+        wallet_b.keys.get_private_spending_key(),
+    );
+
+    if let Err(e) = witness_b.write_prover_toml(circuit_dir) {
+        println!("❌ Failed to write witness B: {}", e);
+        return;
+    }
+
+    let proof_b_result = generate_proof(circuit_dir, "circuits").await;
+    let proof_b_bytes = match proof_b_result {
+        Ok(path) => {
+            println!("   ✅ Proof B generated");
+            match fs::read(&path) {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    println!("❌ Failed to read proof B: {}", e);
+                    return;
+                }
+            }
+        }
+        Err(e) => {
+            println!("❌ Proof B generation failed: {}", e);
+            return;
+        }
+    };
+
+    // 11. Call atomicSwap on contract
+    println!("\n📡 Calling atomicSwap()...");
+
+    let signer: PrivateKeySigner =
+        "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+            .parse()
+            .expect("valid private key");
+    let provider = ProviderBuilder::new()
+        .wallet(signer)
+        .connect(RPC_URL)
+        .await
+        .expect("Failed to configure provider");
+
+    let contract_address = PRIVATE_BOND_ADDRESS.parse().expect("valid contract address");
+    let contract = PrivateBond::new(contract_address, provider);
+
+    // Build public inputs for proof A
+    let root_a = fr_to_bytes32(&merkle_root);
+    let null_a = fr_to_bytes32(&nullifier_a);
+    let comm_a = fr_to_bytes32(&commitment_to_b);
+    let maturity_a = FixedBytes::<32>::from_slice(&{
+        let mut bytes = [0u8; 32];
+        bytes[24..32].copy_from_slice(&bond_a.maturity_date.to_be_bytes());
+        bytes
+    });
+
+    // Build public inputs for proof B
+    let root_b = fr_to_bytes32(&merkle_root);
+    let null_b = fr_to_bytes32(&nullifier_b);
+    let comm_b = fr_to_bytes32(&commitment_to_a);
+    let maturity_b = FixedBytes::<32>::from_slice(&{
+        let mut bytes = [0u8; 32];
+        bytes[24..32].copy_from_slice(&bond_b.maturity_date.to_be_bytes());
+        bytes
+    });
+
+    match contract
+        .atomicSwap(
+            Bytes::from(proof_a_bytes),
+            vec![root_a, null_a, comm_a, maturity_a],
+            Bytes::from(proof_b_bytes),
+            vec![root_b, null_b, comm_b, maturity_b],
+        )
+        .send()
+        .await
+    {
+        Ok(pending) => match pending.watch().await {
+            Ok(tx_hash) => {
+                println!("   ✅ AtomicSwap confirmed: {:?}", tx_hash);
+            }
+            Err(e) => {
+                println!("   ⚠️  Transaction pending but watch failed: {}", e);
+            }
+        },
+        Err(e) => {
+            println!("   ❌ atomicSwap failed: {}", e);
+            return;
+        }
+    }
+
+    // 12. Save new bonds
+    // Bond for B (received from A)
+    let bond_for_b = Bond {
+        commitment: format!("{}", commitment_to_b),
+        nullifier: format!("{}", wallet_b.keys.sign_nullifier(new_salt_a_to_b)),
+        value: bond_a.value,
+        salt: new_salt_a_to_b,
+        owner: wallet_b.keys.public_spending_key_hex.clone(),
+        asset_id: bond_a.asset_id,
+        maturity_date: bond_a.maturity_date,
+        created_at: Utc::now().to_rfc3339(),
+    };
+    let file_b = format!("{}/bond_{}_{}.json", DATA_DIR, wallet_b_name, &format!("{:016x}", new_salt_a_to_b)[..8]);
+    if let Err(e) = fs::write(&file_b, serde_json::to_string_pretty(&bond_for_b).unwrap()) {
+        println!("⚠️  Failed to save bond for B: {}", e);
+    } else {
+        println!("\n✅ Bond for {} saved: {}", wallet_b_name, file_b);
+    }
+
+    // Bond for A (received from B)
+    let bond_for_a = Bond {
+        commitment: format!("{}", commitment_to_a),
+        nullifier: format!("{}", wallet_a.keys.sign_nullifier(new_salt_b_to_a)),
+        value: bond_b.value,
+        salt: new_salt_b_to_a,
+        owner: wallet_a.keys.public_spending_key_hex.clone(),
+        asset_id: bond_b.asset_id,
+        maturity_date: bond_b.maturity_date,
+        created_at: Utc::now().to_rfc3339(),
+    };
+    let file_a = format!("{}/bond_{}_{}.json", DATA_DIR, wallet_a_name, &format!("{:016x}", new_salt_b_to_a)[..8]);
+    if let Err(e) = fs::write(&file_a, serde_json::to_string_pretty(&bond_for_a).unwrap()) {
+        println!("⚠️  Failed to save bond for A: {}", e);
+    } else {
+        println!("✅ Bond for {} saved: {}", wallet_a_name, file_a);
+    }
+
+    // 13. Encrypt memos for each party
+    let note_for_b = Note {
+        value: bond_a.value,
+        salt: new_salt_a_to_b,
+        owner: new_salt_a_to_b,
+        asset_id: bond_a.asset_id,
+        maturity_date: bond_a.maturity_date,
+    };
+    if let Ok(memo) = Note::encrypt(&wallet_a.keys, wallet_b.keys.public_viewing_key(), &note_for_b) {
+        let memo_file = format!("{}/memo_trade_{}_{}.bin", DATA_DIR, wallet_b_name, &format!("{:016x}", new_salt_a_to_b)[..8]);
+        let _ = fs::write(&memo_file, &memo.ciphertext);
+        println!("🔒 Encrypted memo for {} saved", wallet_b_name);
+    }
+
+    let note_for_a = Note {
+        value: bond_b.value,
+        salt: new_salt_b_to_a,
+        owner: new_salt_b_to_a,
+        asset_id: bond_b.asset_id,
+        maturity_date: bond_b.maturity_date,
+    };
+    if let Ok(memo) = Note::encrypt(&wallet_b.keys, wallet_a.keys.public_viewing_key(), &note_for_a) {
+        let memo_file = format!("{}/memo_trade_{}_{}.bin", DATA_DIR, wallet_a_name, &format!("{:016x}", new_salt_b_to_a)[..8]);
+        let _ = fs::write(&memo_file, &memo.ciphertext);
+        println!("🔒 Encrypted memo for {} saved", wallet_a_name);
+    }
+
+    // 14. Update tree state
+    tree_state.add_commitment(commitment_to_b);
+    tree_state.add_commitment(commitment_to_a);
+    println!("   📝 Added 2 new commitments to merkle tree");
+
+    println!("\n🎉 Trade complete!");
 }
 
 async fn redeem(_wallet_name: &str, bond_path: &str) {
@@ -725,5 +1103,103 @@ fn info(bond_path: &str) {
     } else {
         let days = (bond.maturity_date - now) / 86400;
         println!("   Status:     🟢 {} days remaining", days);
+    }
+}
+
+fn scan(wallet_name: &str, sender_name: Option<&str>) {
+    println!("\n🔍 Scanning for encrypted memos...");
+
+    // Load recipient wallet
+    let recipient_wallet = match load_wallet(wallet_name) {
+        Some(w) => w,
+        None => {
+            println!("❌ Wallet '{}' not found", wallet_name);
+            return;
+        }
+    };
+
+    // Find memo files for this wallet
+    let entries = match fs::read_dir(DATA_DIR) {
+        Ok(e) => e,
+        Err(_) => {
+            println!("❌ Cannot read data directory");
+            return;
+        }
+    };
+
+    let mut memos_found = 0;
+    let mut decrypted_count = 0;
+
+    for entry in entries.flatten() {
+        let filename = entry.file_name().to_string_lossy().to_string();
+        if !filename.ends_with(".bin") {
+            continue;
+        }
+        if !filename.contains(&format!("_{}_", wallet_name)) && !filename.contains(&format!("_{}", wallet_name)) {
+            continue;
+        }
+
+        memos_found += 1;
+        let memo_path = entry.path();
+        
+        // Read memo ciphertext
+        let ciphertext = match fs::read(&memo_path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let memo = notes::Memo { ciphertext };
+
+        // Try decryption with specified sender or all known wallets
+        let sender_wallets: Vec<String> = if let Some(name) = sender_name {
+            vec![name.to_string()]
+        } else {
+            // Find all wallet files
+            fs::read_dir(DATA_DIR)
+                .ok()
+                .map(|entries| {
+                    entries
+                        .flatten()
+                        .filter_map(|e| {
+                            let name = e.file_name().to_string_lossy().to_string();
+                            if name.starts_with("wallet_") && name.ends_with(".json") {
+                                Some(name.trim_start_matches("wallet_").trim_end_matches(".json").to_string())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+
+        for sender_wallet_name in &sender_wallets {
+            if let Some(sender_wallet) = load_wallet(sender_wallet_name) {
+                match Note::decrypt(
+                    &recipient_wallet.keys,
+                    sender_wallet.keys.public_viewing_key(),
+                    &memo,
+                ) {
+                    Ok(note) => {
+                        decrypted_count += 1;
+                        println!("\n   📬 Memo from '{}': {}", sender_wallet_name, filename);
+                        println!("      Value:    {}", note.value);
+                        println!("      Salt:     {:016x}", note.salt);
+                        println!("      Asset ID: {}", note.asset_id);
+                        println!("      Maturity: {}", format_date(note.maturity_date));
+                        break; // Found the right sender
+                    }
+                    Err(_) => continue, // Try next sender
+                }
+            }
+        }
+    }
+
+    if memos_found == 0 {
+        println!("   No memos found for wallet '{}'", wallet_name);
+    } else {
+        println!("\n✅ Found {} memos, decrypted {}", memos_found, decrypted_count);
+        if decrypted_count < memos_found {
+            println!("   ℹ️  Some memos could not be decrypted (sender unknown)");
+        }
     }
 }
