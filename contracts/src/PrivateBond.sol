@@ -17,11 +17,7 @@ contract PrivateBond is Ownable {
         verifier = HonkVerifier(_verifier);
     }
 
-    function mint(bytes32 commitment, bytes32 newRoot) external onlyOwner {
-        commitments.push(commitment);
-        knownRoots[newRoot] = true;
-    }
-
+    // Transfer a bond ownership
     function transfer(
         bytes calldata proof,
         bytes32 root,
@@ -61,6 +57,7 @@ contract PrivateBond is Ownable {
         knownRoots[newRoot] = true;
     }
 
+    // Build the merkle root to update contract state
     function buildMerkleRoot() internal view returns (bytes32) {
         require(commitments.length > 0, "No commitments provided");
         
@@ -82,7 +79,6 @@ contract PrivateBond is Ownable {
         return currentLevel[0];
     }
 
-    // To do: Implement with Poseidon
     function poseidonHash(bytes32 _left, bytes32 _right) internal pure returns (bytes32) {
         uint hash = PoseidonT3.hash([uint256(_left), uint256(_right)]);
         return bytes32(hash);

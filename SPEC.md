@@ -6,10 +6,10 @@ Users maintain two identity layers:
 
 **Transport Identity**: Standard Ethereum address (ECDSA). Visible on-chain. Used for gas payment and contract authorization.
 
-**Shielded Identity**: Privacy keypair derived from a user-generated 256-bit seed. Never published on-chain. From the seed, two keypairs are derived deterministically:
+**Shielded Identity**: Privacy spending keypair derived from a user-generated 256-bit seed, and Encryption keypair for memos sharing. Never published on-chain. From the seed, two keypairs are derived deterministically:
 
 ```
-ZK Signing Keypair (EdDSA/BN254):
+Spending Keypair (Poseidon/BN254):
   private_spending_key = hash(seed || "spending_key")
   public_spending_key = Poseidon(private_spending_key)
 
@@ -24,7 +24,7 @@ The Shielded Identity enables proof generation and memo encryption without revea
 
 ## Primary Market: Issuance
 
-Issuer creates a single Global Note representing the entire bond tranche. This note exists in the shielded pool and is distributed on-demand via standard JoinSplit transactions:
+Issuer creates a single Global Note representing the entire bond tranche. This note exists in the shielded pool and is distributed on-demand via standard `JoinSplit` transactions:
 
 1. Issuer generates ZK proof minting Global Note (e.g., $100M) to their Shielded Key
 2. Merkle tree grows by 1 leaf
@@ -33,15 +33,15 @@ Issuer creates a single Global Note representing the entire bond tranche. This n
    - Output 1: Investor A Note ($10M)
    - Output 2: Issuer Change Note ($90M)
 
-Each transaction atomically adds new note commitments to the Merkle tree.
+Each transaction atomically adds new note commitments to the Merkle tree. Note that this could also be done by sharding total emission amount into multiple notes.
 
 ## Secondary Market: Trading
 
 Traders interact via Issuer as relayer:
 
-1. Alice and Bob negotiate off-chain, exchange Shielded public keys
+1. Alice and Bob negotiate off-chain, exchange public viewing keys
 2. Alice creates ZK proof A: spends her bond note, outputs note for Bob
-3. Alice encrypts memo: value, salt, assetId (encrypted with ECDH(privKey_alice, pubKey_bob))
+3. Alice encrypts memo: value, salt, assetId (encrypted with ECDH(`private_viewing_key_alice`, `public_viewing_key_bob`))
 4. Alice submits proof + memo to Issuer via secure channel
 5. Bob similarly creates proof B + memo, submits to Issuer
 6. Issuer verifies both are whitelisted, decrypts memos for audit
@@ -52,7 +52,7 @@ Traders interact via Issuer as relayer:
 **Memo Encryption**:
 
 ```
-shared_secret = X25519(alice_privkey_x25519, bob_pubkey_x25519)
+shared_secret = X25519(private_viewing_key_alice, public_viewing_key_bob)
 Key = BLAKE2b(S ∥ A_eph ∥ B_static)
 Ciphertext = ChaCha20-Poly1305(Key, Note_Data)
 ```
@@ -123,7 +123,7 @@ Redemption reuses the `JoinSplit` proof structure:
 Binary tree, height 16, Poseidon hashing over BN254.
 
 ```
-Leaf:          commit = Poseidon(value, salt, owner, assetId)
+Leaf:          commit = Poseidon(value, salt, owner, assetId, maturityDate)
 Internal Node: hash(left, right) = Poseidon(left, right)
 ```
 
@@ -198,35 +198,16 @@ Private Inputs:
 - Atomic Swap Integrity: Relayer can execute mismatched proofs (wrong assets traded) ❌
   - Mitigation: Both proofs must include a shared intent commitment binding them to the same pair of nullifiers and assets, verified in both constraints
 
-## POC Implementation Notes
-
-This repository is a proof-of-concept. The following simplifications were made:
-
-| Spec | POC Implementation | Rationale |
-|------|-------------------|-----------|
-| Merkle tree height 16 | Height 3 (8 leaves max) | Faster proof generation for demos |
-| Whitelist `mapping(address => bool)` | `onlyOwner` modifier | Single issuer is sufficient for POC |
-| Deterministic salt `Poseidon(privkey, index)` | Random salt `rand::random()` | Simpler, no index tracking needed |
-| Memos stored on-chain | Memos stored locally (`data/*.bin`) | Avoids on-chain storage costs |
-| Client-side memo encryption | Relayer encrypts memos | Trusted relayer model for POC |
-
-### Known Limitations
-
-- **Tree capacity**: Only 8 notes max (height 3). Production would use height 16-32.
-- **No KYC whitelist**: Any address with contract owner privkey can transact.
-- **Trusted relayer for memos**: Relayer has access to both parties' keys during trade. Production would require client-side encryption before submission.
-- **Single asset type**: All notes share same `assetId`. Multi-asset would require per-asset trees or asset binding in commitments.
-
 ## Terminology
 
 - **Note**: Private asset represented by a commitment (value, salt, owner, assetId, maturityDate)
 - **Commitment**: Hash of a note: `Poseidon(value, salt, owner, assetId, maturityDate)`
-- **Salt**: Random value for commitment uniqueness (POC uses random; spec suggests deterministic)
+- **Salt**: Deterministic for better storage, `Poseidon(private_key, note_index)`
 - **Nullifier**: Deterministic identifier for a spent note: `Poseidon(salt, private_key)`
 - **Shielded Key**: User's privacy keypair derived from seed
 - **Merkle Root**: Root hash of the note commitment tree
 - **Proof**: Cryptographic evidence satisfying all constraints without revealing private data
-- **Memo**: Encrypted note details for recipient (stored locally in POC)
-- **Burn Proof**: Redemption proof that spends bond notes with output values = 0
+- **Memo**: Encrypted note details sent on-chain, only recipient can decrypt
+- **Burn Proof**: Redemption proof that spends bond notes without outputs (or with change)
 - **Issuer**: Bond issuer, trusted relayer, and settlement coordinator
 - **Trader**: Investor participant in secondary market trades
