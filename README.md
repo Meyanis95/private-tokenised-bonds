@@ -256,6 +256,8 @@ This repository is a proof-of-concept. The following simplifications were made:
 | Deterministic salt `Poseidon(privkey, index)` | Random salt `rand::random()`        | Simpler, no index tracking needed   |
 | Memos stored on-chain                         | Memos stored locally (`data/*.bin`) | Avoids on-chain storage costs       |
 | Client-side memo encryption                   | Relayer encrypts memos              | Trusted relayer model for POC       |
+| 254-bit salt (Field element)                  | 64-bit salt (`u64`)                 | Simpler serialization for POC       |
+| Swap binder hash in circuit                   | No cryptographic binding            | Trusted relayer assumed for POC     |
 
 ### Known Limitations
 
@@ -263,6 +265,9 @@ This repository is a proof-of-concept. The following simplifications were made:
 - **No KYC whitelist**: Any address with contract owner privkey can transact.
 - **Trusted relayer for memos**: Relayer has access to both parties' keys during trade. Production would require client-side encryption before submission.
 - **Single asset type**: All notes share same `assetId`. Multi-asset would require per-asset trees or asset binding in commitments.
+- **Weak salt entropy**: Salt is 64-bit (`u64`), which is theoretically brute-forceable. Production should use 254-bit Field elements.
+- **Issuer knows all secrets**: Issuer generates notes and knows salts, enabling deanonymization. Production should have users generate commitments locally first.
+- **No swap binding**: Atomic swaps lack cryptographic binding between proofs. A malicious relayer could mix-match. Production should add `binder_hash` constraint.
 
 ## License
 

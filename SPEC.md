@@ -194,9 +194,16 @@ Private Inputs:
 - Issuer censorship: No mitigation (trusted relayer model) ❌
 - Issuer frontrunning: Mitigated by regulation, not cryptography ❌
 - Issuer decryption key: Single point of failure, can expose entire market ❌
-  - Mitigation: Implement per note Viewing Keys or Selective Disclosure
+  - Mitigation: Implement per-note Viewing Keys or Selective Disclosure
 - Atomic Swap Integrity: Relayer can execute mismatched proofs (wrong assets traded) ❌
-  - Mitigation: Both proofs must include a shared intent commitment binding them to the same pair of nullifiers and assets, verified in both constraints
+  - Mitigation: Both proofs must include a shared `binder_hash = Poseidon(my_commitment, counterparty_commitment)`, verified in circuit and contract
+
+**Known Vulnerabilities (PoC scope)**:
+
+- **Issuer Deanonymization**: The issuer generates notes and knows all salts, allowing them to track all spends. In production, users should generate their own commitments and send only the commitment (not secrets) to the issuer.
+- **Weak Salt Entropy**: Salt is currently `u64` (64 bits). A 2^64 search space is brute-forceable by well-resourced adversaries. Production should use full Field elements (~254 bits).
+- **Missing Swap Binder**: Atomic swaps lack cryptographic binding between the two proofs. A malicious relayer could theoretically mix-match proofs. Production should add `binder_hash` as a public circuit input.
+- **Single Asset Type**: All notes share the same `assetId`. Multi-asset support would require per-asset value conservation or separate Merkle trees.
 
 ## Terminology
 
