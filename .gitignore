@@ -1,22 +1,22 @@
 # Noir (circuits)
-circuits/target/
-circuits/Cargo.lock
-circuits/.noir-artifacts
+custom-private-utxo/circuits/target/
+custom-private-utxo/circuits/Cargo.lock
+custom-private-utxo/circuits/.noir-artifacts
 
 # Solidity / Foundry (contracts)
-contracts/node_modules/
-contracts/cache/
-contracts/out/
-contracts/broadcast/
-contracts/artifacts/
-contracts/.env
-contracts/.env.local
-contracts/lib
+custom-private-utxo/contracts/node_modules/
+custom-private-utxo/contracts/cache/
+custom-private-utxo/contracts/out/
+custom-private-utxo/contracts/broadcast/
+custom-private-utxo/contracts/artifacts/
+custom-private-utxo/contracts/.env
+custom-private-utxo/contracts/.env.local
+custom-private-utxo/contracts/lib
 
 # Rust (wallet)
-wallet/target/
-wallet/Cargo.lock
-wallet/.env
+custom-private-utxo/wallet/target/
+custom-private-utxo/wallet/Cargo.lock
+custom-private-utxo/wallet/.env
 
 # IDE
 .vscode/
