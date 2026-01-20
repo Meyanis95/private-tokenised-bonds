@@ -1,0 +1,10 @@
+{
+  "name": "private-l2",
+  "packageManager": "yarn@4.9.1",
+  "dependencies": {
+    "@aztec/accounts": "v3.0.0-devnet.6-patch.1",
+    "@aztec/aztec.js": "v3.0.0-devnet.6-patch.1",
+    "@aztec/kv-store": "v3.0.0-devnet.6-patch.1",
+    "@aztec/test-wallet": "v3.0.0-devnet.6-patch.1"
+  }
+}

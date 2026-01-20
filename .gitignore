@@ -13,10 +13,10 @@ custom-private-utxo/contracts/.env
 custom-private-utxo/contracts/.env.local
 custom-private-utxo/contracts/lib
 
-# Rust (wallet)
-custom-private-utxo/wallet/target/
-custom-private-utxo/wallet/Cargo.lock
-custom-private-utxo/wallet/.env
+# Rust 
+**/target
+**/Cargo.lock
+**/.env
 
 # IDE
 .vscode/
