@@ -90,15 +90,27 @@ export class PrivateBondsContract extends ContractBase {
   }
   
 
-  public static get storage(): ContractStorageLayout<'owner' | 'public_balances'> {
+  public static get storage(): ContractStorageLayout<'owner' | 'public_balances' | 'private_balances' | 'whitelist' | 'total_supply' | 'maturity_date'> {
       return {
         owner: {
       slot: new Fr(1n),
     },
 public_balances: {
       slot: new Fr(2n),
+    },
+private_balances: {
+      slot: new Fr(3n),
+    },
+whitelist: {
+      slot: new Fr(4n),
+    },
+total_supply: {
+      slot: new Fr(5n),
+    },
+maturity_date: {
+      slot: new Fr(6n),
     }
-      } as ContractStorageLayout<'owner' | 'public_balances'>;
+      } as ContractStorageLayout<'owner' | 'public_balances' | 'private_balances' | 'whitelist' | 'total_supply' | 'maturity_date'>;
     }
     
 
@@ -108,20 +120,38 @@ public_balances: {
     /** initialize() */
     initialize: (() => ContractFunctionInteraction) & Pick<ContractMethod, 'selector'>;
 
+    /** mint_private(investor: struct, amount: integer) */
+    mint_private: ((investor: AztecAddressLike, amount: (bigint | number)) => ContractFunctionInteraction) & Pick<ContractMethod, 'selector'>;
+
     /** mint_public(investor: struct, amount: integer) */
     mint_public: ((investor: AztecAddressLike, amount: (bigint | number)) => ContractFunctionInteraction) & Pick<ContractMethod, 'selector'>;
+
+    /** private_balance_of(owner: struct) */
+    private_balance_of: ((owner: AztecAddressLike) => ContractFunctionInteraction) & Pick<ContractMethod, 'selector'>;
+
+    /** private_to_public(amount: integer) */
+    private_to_public: ((amount: (bigint | number)) => ContractFunctionInteraction) & Pick<ContractMethod, 'selector'>;
 
     /** process_message(message_ciphertext: struct, message_context: struct) */
     process_message: ((message_ciphertext: FieldLike[], message_context: { tx_hash: FieldLike, unique_note_hashes_in_tx: FieldLike[], first_nullifier_in_tx: FieldLike, recipient: AztecAddressLike }) => ContractFunctionInteraction) & Pick<ContractMethod, 'selector'>;
 
+    /** public_balance_of(owner: struct) */
+    public_balance_of: ((owner: AztecAddressLike) => ContractFunctionInteraction) & Pick<ContractMethod, 'selector'>;
+
     /** public_dispatch(selector: field) */
     public_dispatch: ((selector: FieldLike) => ContractFunctionInteraction) & Pick<ContractMethod, 'selector'>;
+
+    /** public_to_private(amount: integer) */
+    public_to_private: ((amount: (bigint | number)) => ContractFunctionInteraction) & Pick<ContractMethod, 'selector'>;
 
     /** sync_private_state() */
     sync_private_state: (() => ContractFunctionInteraction) & Pick<ContractMethod, 'selector'>;
 
     /** transfer_ownership(new_owner: struct) */
     transfer_ownership: ((new_owner: AztecAddressLike) => ContractFunctionInteraction) & Pick<ContractMethod, 'selector'>;
+
+    /** transfer_private(to: struct, amount: integer) */
+    transfer_private: ((to: AztecAddressLike, amount: (bigint | number)) => ContractFunctionInteraction) & Pick<ContractMethod, 'selector'>;
 
     /** transfer_public(to: struct, amount: integer) */
     transfer_public: ((to: AztecAddressLike, amount: (bigint | number)) => ContractFunctionInteraction) & Pick<ContractMethod, 'selector'>;

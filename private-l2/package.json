@@ -6,5 +6,8 @@
     "@aztec/aztec.js": "v3.0.0-devnet.6-patch.1",
     "@aztec/kv-store": "v3.0.0-devnet.6-patch.1",
     "@aztec/test-wallet": "v3.0.0-devnet.6-patch.1"
+  },
+  "devDependencies": {
+    "tsx": "^4.21.0"
   }
 }
