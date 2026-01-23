@@ -131,16 +131,16 @@ pub contract PrivateBonds {
         );
     }
 
-    /// Redeem bonds at maturity. Investor must have created an authwit authorizing this call.
-    /// In production, a DvP contract would call this alongside a stablecoin transfer for atomic settlement.
-    /// For PoC, bonds are burned and stablecoin settlement happens off-chain.
-    #[authorize_once("investor", "nonce")]
+    /// Redeem bonds at maturity. Investor burns their bonds directly.
+    /// In production, a DvP contract would use transfer_from (with authwit) for atomic settlement.
+    /// For PoC, investor calls this directly and stablecoin settlement happens off-chain.
     #[external("private")]
-    fn redeem(investor: AztecAddress, bond_amount: u64, nonce: Field) {
+    fn redeem(amount: u64) {
+        let investor = self.msg_sender().unwrap();
         self.enqueue_self._assert_is_whitelisted(investor);
         self.enqueue_self._assert_maturity_reached();
 
-        self.storage.private_balances.at(investor).sub(bond_amount as u128).deliver(
+        self.storage.private_balances.at(investor).sub(amount as u128).deliver(
             MessageDelivery.CONSTRAINED_ONCHAIN,
         );
     }

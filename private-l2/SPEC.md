@@ -180,7 +180,7 @@ The investor's authwit is a **signed redemption request** that:
 - Only issuer and investor know redemption details
 - Total supply unchanged (bonds burned, not transferred)
 
-> **PoC Limitation**: Full authwit redemption requires a stablecoin contract integration. For PoC, we implement a simple `burn_private(amount)` where investor burns bonds and settlement happens off-chain via fiat.
+> **PoC Limitation**: Full authwit redemption requires a stablecoin contract integration. For PoC, we implement a simple `redeem(amount)` where investor burns their own bonds directly and stablecoin settlement happens off-chain via fiat.
 
 ## Regulatory Viewing Keys
 

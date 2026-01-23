@@ -278,23 +278,15 @@ echo "  2. Issuer calls redeem() - #[authorize_once] verifies authwit"
 echo "  3. Bonds burned, stablecoin settlement off-chain (PoC) or via DvP (prod)"
 echo ""
 
-NONCE_A="0x0000000000000000000000000000000000000000000000000000000000000001"
-NONCE_B="0x0000000000000000000000000000000000000000000000000000000000000002"
+# Investors call redeem directly - no authwit needed for PoC.
+# In production, a DvP contract would use transfer_from (with authwit) for atomic settlement.
 
-echo "Step 1: Investor A creates authwit authorizing redeem(A, 400000, nonce)..."
-aztec-wallet create-authwit redeem accounts:test0 --from accounts:test1 --contract-address contracts:privatebonds --args accounts:test1 400000 $NONCE_A
-
-echo ""
-echo "Step 2: Issuer calls redeem() for Investor A..."
-aztec-wallet send redeem --from accounts:test0 --contract-address contracts:privatebonds --args accounts:test1 400000 $NONCE_A
+echo "Investor A redeems their bonds..."
+aztec-wallet send redeem --from accounts:test1 --contract-address contracts:privatebonds --args 400000
 
 echo ""
-echo "Step 3: Investor B creates authwit authorizing redeem(B, 400000, nonce)..."
-aztec-wallet create-authwit redeem accounts:test0 --from accounts:test2 --contract-address contracts:privatebonds --args accounts:test2 400000 $NONCE_B
-
-echo ""
-echo "Step 4: Issuer calls redeem() for Investor B..."
-aztec-wallet send redeem --from accounts:test0 --contract-address contracts:privatebonds --args accounts:test2 400000 $NONCE_B
+echo "Investor B redeems their bonds..."
+aztec-wallet send redeem --from accounts:test2 --contract-address contracts:privatebonds --args 400000
 
 echo ""
 echo "All bonds redeemed (burned)."
