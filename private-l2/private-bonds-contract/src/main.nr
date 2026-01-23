@@ -3,7 +3,7 @@ use aztec::macros::aztec;
 #[aztec]
 pub contract PrivateBonds {
     use aztec::{
-        macros::{functions::{external, initializer, only_self}, storage::storage},
+        macros::{functions::{authorize_once, external, initializer, only_self}, storage::storage},
         protocol_types::address::AztecAddress,
         state_vars::{Map, Owned, public_mutable::PublicMutable},
     };
@@ -12,17 +12,10 @@ pub contract PrivateBonds {
 
     #[storage]
     struct Storage<Context> {
-        // Issuer's admin address - can distribute tokens and manage whitelist
         owner: PublicMutable<AztecAddress, Context>,
-        // Public balances - visible for transparency (used for public operations)
-        public_balances: Map<AztecAddress, PublicMutable<u64, Context>, Context>,
-        // Private balances - encrypted notes, only visible to note owner
         private_balances: Owned<BalanceSet<Context>, Context>,
-        // List of authorized addresses (KYC'd investors)
         whitelist: Map<AztecAddress, PublicMutable<bool, Context>, Context>,
-        // Total bond supply - fixed at initialization, never changes
         total_supply: PublicMutable<u64, Context>,
-        // Maturity date of the bond
         maturity_date: PublicMutable<u64, Context>,
     }
 
@@ -107,13 +100,14 @@ pub contract PrivateBonds {
     fn transfer_private(to: AztecAddress, amount: u64) {
         let sender = self.msg_sender().unwrap();
 
+        // Check both sender and recipient are whitelisted
+        self.enqueue_self._assert_is_whitelisted(sender);
+        self.enqueue_self._assert_is_whitelisted(to);
+
         // Spend sender's notes
         self.storage.private_balances.at(sender).sub(amount as u128).deliver(
             MessageDelivery.CONSTRAINED_ONCHAIN,
         );
-
-        // Check recipient is whitelisted (reveals recipient address)
-        self.enqueue_self._assert_is_whitelisted(to);
 
         // Create new notes for recipient
         self.storage.private_balances.at(to).add(amount as u128).deliver(
@@ -121,74 +115,34 @@ pub contract PrivateBonds {
         );
     }
 
+    /// Delegated transfer for DvP and other authorized scenarios.
+    /// Requires `from` to have created an authwit for this exact call.
+    #[authorize_once("from", "nonce")]
     #[external("private")]
-    fn redeem_private(amount: u64) {
-        let sender = self.msg_sender().unwrap();
+    fn transfer_from(from: AztecAddress, to: AztecAddress, amount: u64, nonce: Field) {
+        self.enqueue_self._assert_is_whitelisted(from);
+        self.enqueue_self._assert_is_whitelisted(to);
 
-        // Check maturity reached
+        self.storage.private_balances.at(from).sub(amount as u128).deliver(
+            MessageDelivery.CONSTRAINED_ONCHAIN,
+        );
+        self.storage.private_balances.at(to).add(amount as u128).deliver(
+            MessageDelivery.CONSTRAINED_ONCHAIN,
+        );
+    }
+
+    /// Redeem bonds at maturity. Investor must have created an authwit authorizing this call.
+    /// In production, a DvP contract would call this alongside a stablecoin transfer for atomic settlement.
+    /// For PoC, bonds are burned and stablecoin settlement happens off-chain.
+    #[authorize_once("investor", "nonce")]
+    #[external("private")]
+    fn redeem(investor: AztecAddress, bond_amount: u64, nonce: Field) {
+        self.enqueue_self._assert_is_whitelisted(investor);
         self.enqueue_self._assert_maturity_reached();
 
-        // Transfer from investor back to issuer
-        self.storage.private_balances.at(sender).sub(amount as u128).deliver(
+        self.storage.private_balances.at(investor).sub(bond_amount as u128).deliver(
             MessageDelivery.CONSTRAINED_ONCHAIN,
         );
-
-        // Credit issuer's balance (need to read owner from public state)
-        self.enqueue_self._credit_issuer_private(amount);
-    }
-
-    #[external("public")]
-    #[only_self]
-    fn _credit_issuer_private(amount: u64) {
-        // This is a workaround - we need to credit issuer but can't read owner in private
-        // In practice, this would need a different pattern (e.g., pass owner as param and verify)
-        // For PoC, we'll handle this via public credit to issuer
-        let issuer = self.storage.owner.read();
-        let balance = self.storage.public_balances.at(issuer).read();
-        self.storage.public_balances.at(issuer).write(balance + amount);
-    }
-
-    #[external("public")]
-    fn transfer_public(to: AztecAddress, amount: u64) {
-        let sender = self.msg_sender().unwrap();
-        let sender_balance = self.storage.public_balances.at(sender).read();
-        assert(sender_balance >= amount, "Insufficient Bond tokens");
-
-        // Deduct from sender
-        self.storage.public_balances.at(sender).write(sender_balance - amount);
-
-        // Check recipient is whitelisted
-        assert(self.storage.whitelist.at(to).read(), "Recipient is not whitelisted");
-
-        // Add to recipient
-        let recipient_balance = self.storage.public_balances.at(to).read();
-        self.storage.public_balances.at(to).write(recipient_balance + amount);
-    }
-
-    #[external("private")]
-    fn public_to_private(amount: u64) {
-        let sender = self.msg_sender().unwrap();
-
-        // Deduct from public balance
-        self.enqueue_self._deduct_public_balance(sender, amount);
-
-        // Add to private balance
-        self.storage.private_balances.at(sender).add(amount as u128).deliver(
-            MessageDelivery.CONSTRAINED_ONCHAIN,
-        );
-    }
-
-    #[external("private")]
-    fn private_to_public(amount: u64) {
-        let sender = self.msg_sender().unwrap();
-
-        // Remove from private balance
-        self.storage.private_balances.at(sender).sub(amount as u128).deliver(
-            MessageDelivery.CONSTRAINED_ONCHAIN,
-        );
-
-        // Credit public balance
-        self.enqueue_self._credit_public_balance(sender, amount);
     }
 
     #[external("public")]
@@ -204,11 +158,6 @@ pub contract PrivateBonds {
     #[external("utility")]
     unconstrained fn private_balance_of(owner: AztecAddress) -> pub u128 {
         self.storage.private_balances.at(owner).balance_of()
-    }
-
-    #[external("utility")]
-    unconstrained fn public_balance_of(owner: AztecAddress) -> pub u64 {
-        self.storage.public_balances.at(owner).read()
     }
 
     #[external("utility")]
@@ -246,18 +195,4 @@ pub contract PrivateBonds {
         assert(block_timestamp >= maturity_date, "Bond has not reached maturity yet");
     }
 
-    #[external("public")]
-    #[only_self]
-    fn _deduct_public_balance(owner: AztecAddress, amount: u64) {
-        let balance = self.storage.public_balances.at(owner).read();
-        assert(balance >= amount, "Insufficient public bond tokens");
-        self.storage.public_balances.at(owner).write(balance - amount);
-    }
-
-    #[external("public")]
-    #[only_self]
-    fn _credit_public_balance(owner: AztecAddress, amount: u64) {
-        let balance = self.storage.public_balances.at(owner).read();
-        self.storage.public_balances.at(owner).write(balance + amount);
-    }
 }

@@ -252,14 +252,17 @@ echo ""
 # PHASE 5: REDEMPTION AT MATURITY
 # ==============================================================================
 #
-# At maturity, investors redeem bonds by transferring them back to the issuer.
-# This is NOT burning - it's returning tokens to issuer's pool.
+# At maturity, investors redeem bonds via authwit:
+#   1. Investor creates authwit authorizing bond burn (off-chain)
+#   2. Issuer calls redeem() - authwit verified by #[authorize_once] macro
+#
+# In production, a DvP contract would call redeem() alongside a stablecoin
+# transfer for atomic settlement. For PoC, bonds are burned and stablecoin
+# settlement happens off-chain.
 #
 # PRIVACY:
-#   - Redemption uses redeem_private()
-#   - Investor's notes are consumed (private)
-#   - Amount credited to issuer (for payment tracking)
-#   - Total supply: UNCHANGED (tokens return to issuer, not destroyed)
+#   - Redemption amount hidden (private function)
+#   - Only issuer and investor know redemption details
 #
 # ==============================================================================
 
@@ -267,25 +270,35 @@ echo "=============================================================="
 echo "PHASE 5: REDEMPTION AT MATURITY"
 echo "=============================================================="
 echo ""
-echo "Bond has reached maturity. Investors redeem their holdings."
+echo "Bond has reached maturity. Investors request redemption."
 echo ""
-echo "Using redeem_private():"
-echo "  - Investor's notes are consumed (private)"
-echo "  - Issuer receives the tokens back"
-echo "  - Total supply: UNCHANGED (still 1,000,000)"
+echo "AUTHWIT REDEMPTION FLOW:"
+echo "  1. Investor creates authwit authorizing: redeem(investor, amount, nonce)"
+echo "  2. Issuer calls redeem() - #[authorize_once] verifies authwit"
+echo "  3. Bonds burned, stablecoin settlement off-chain (PoC) or via DvP (prod)"
 echo ""
 
-echo "Investor A redeems their bonds..."
-aztec-wallet send redeem_private --from accounts:test1 --contract-address contracts:privatebonds --args 400000
+NONCE_A="0x0000000000000000000000000000000000000000000000000000000000000001"
+NONCE_B="0x0000000000000000000000000000000000000000000000000000000000000002"
+
+echo "Step 1: Investor A creates authwit authorizing redeem(A, 400000, nonce)..."
+aztec-wallet create-authwit redeem accounts:test0 --from accounts:test1 --contract-address contracts:privatebonds --args accounts:test1 400000 $NONCE_A
 
 echo ""
-echo "Investor B redeems their bonds..."
-aztec-wallet send redeem_private --from accounts:test2 --contract-address contracts:privatebonds --args 400000
+echo "Step 2: Issuer calls redeem() for Investor A..."
+aztec-wallet send redeem --from accounts:test0 --contract-address contracts:privatebonds --args accounts:test1 400000 $NONCE_A
 
 echo ""
-echo "All bonds redeemed."
+echo "Step 3: Investor B creates authwit authorizing redeem(B, 400000, nonce)..."
+aztec-wallet create-authwit redeem accounts:test0 --from accounts:test2 --contract-address contracts:privatebonds --args accounts:test2 400000 $NONCE_B
+
 echo ""
-echo "[Off-chain: Issuer initiates wire transfers to investors for par value]"
+echo "Step 4: Issuer calls redeem() for Investor B..."
+aztec-wallet send redeem --from accounts:test0 --contract-address contracts:privatebonds --args accounts:test2 400000 $NONCE_B
+
+echo ""
+echo "All bonds redeemed (burned)."
+echo "In production: DvP contract would atomically transfer stablecoins."
 echo ""
 
 # ==============================================================================
@@ -297,53 +310,22 @@ echo "FINAL STATE"
 echo "=============================================================="
 echo ""
 
-echo "Investor A's final balances:"
-echo "  Public: $(aztec-wallet simulate public_balance_of --from accounts:test0 --contract-address contracts:privatebonds --args accounts:test1)"
-echo "  Private: $(aztec-wallet simulate private_balance_of --from accounts:test1 --contract-address contracts:privatebonds --args accounts:test1)"
+echo "Investor A's private balance (should be 0 - all redeemed):"
+aztec-wallet simulate private_balance_of --from accounts:test1 --contract-address contracts:privatebonds --args accounts:test1
 echo ""
 
-echo "Investor B's final balances:"
-echo "  Public: $(aztec-wallet simulate public_balance_of --from accounts:test0 --contract-address contracts:privatebonds --args accounts:test2)"
-echo "  Private: $(aztec-wallet simulate private_balance_of --from accounts:test2 --contract-address contracts:privatebonds --args accounts:test2)"
+echo "Investor B's private balance (should be 0 - all redeemed):"
+aztec-wallet simulate private_balance_of --from accounts:test2 --contract-address contracts:privatebonds --args accounts:test2
 echo ""
 
-echo "Issuer's balances (received redemptions):"
-echo "  Public: $(aztec-wallet simulate public_balance_of --from accounts:test0 --contract-address contracts:privatebonds --args accounts:test0)"
-echo "  Private: $(aztec-wallet simulate private_balance_of --from accounts:test0 --contract-address contracts:privatebonds --args accounts:test0)"
+echo "Issuer's private balance (should be 200,000 - unsold bonds):"
+aztec-wallet simulate private_balance_of --from accounts:test0 --contract-address contracts:privatebonds --args accounts:test0
 echo ""
 
-echo "Total supply (should still be 1,000,000):"
+echo "Total supply (still 1,000,000 - fixed at initialization):"
 aztec-wallet simulate get_total_supply --from accounts:test0 --contract-address contracts:privatebonds
 echo ""
 
-# ==============================================================================
-# PRIVACY SUMMARY
-# ==============================================================================
-
-echo "=============================================================="
-echo "PRIVACY SUMMARY"
-echo "=============================================================="
-echo ""
-echo "Throughout the bond lifecycle, an outside observer could see:"
-echo ""
-echo "  [PUBLIC - By Design]"
-echo "  - Bond terms (total supply: 1M fixed, maturity date)"
-echo "  - Who is authorized to hold bonds (whitelist)"
-echo "  - That transactions occurred (nullifiers + commitments)"
-echo ""
-echo "  [HIDDEN - Protected]"
-echo "  - Individual investor allocations"
-echo "  - Trade amounts between parties"
-echo "  - Running balances"
-echo ""
-echo "KEY PRIVACY IMPROVEMENT:"
-echo "  Total supply is FIXED at 1,000,000 and NEVER changes."
-echo "  This prevents observers from deducing transaction amounts"
-echo "  by watching supply changes."
-echo ""
-echo "  Old model: mint 500k -> supply 0->500k (leaks allocation)"
-echo "  New model: distribute 500k -> supply stays 1M (no leak)"
-echo ""
 echo "=============================================================="
 echo "DEMO COMPLETE"
 echo "=============================================================="
