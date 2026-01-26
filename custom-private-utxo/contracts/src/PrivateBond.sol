@@ -48,6 +48,14 @@ contract PrivateBond is Ownable {
         knownRoots[newRoot] = true;
     }
 
+    // Minting a new bond
+    function mint(bytes32 _commitment) external onlyOwner {
+        commitments.push(_commitment);
+        
+        bytes32 newRoot = buildMerkleRoot();
+        knownRoots[newRoot] = true;
+    }
+
     // Enables minting all the bonds at once
     function mintBatch(bytes32[] memory _commitments) external onlyOwner {
         for (uint32 i = 0; i < _commitments.length; i++) {
@@ -58,7 +66,7 @@ contract PrivateBond is Ownable {
     }
 
     // Build the merkle root to update contract state
-    function buildMerkleRoot() internal view returns (bytes32) {
+    function buildMerkleRoot() public view returns (bytes32) {
         require(commitments.length > 0, "No commitments provided");
         
         bytes32[] memory currentLevel = commitments;

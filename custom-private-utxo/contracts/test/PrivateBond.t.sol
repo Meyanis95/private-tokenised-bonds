@@ -31,8 +31,9 @@ contract PrivateBondTest is Test {
 
     function testMintBond() public {
         bytes32 comm = 0x1de409fb2319657514027650e41731fc3c5b77448fdd2b9aceeda9cf95c499e7;
-        privateBond.mint(comm, ROOT);
-        assertTrue(privateBond.knownRoots(ROOT));
+        privateBond.mint(comm);
+        // After minting, the contract should have stored this commitment
+        assertEq(privateBond.commitments(0), comm);
     }
 
     function testMintBatch() public {
@@ -44,16 +45,17 @@ contract PrivateBondTest is Test {
     }
 
     function testAtomicSwap() public {
-        privateBond.mint(0x1de409fb2319657514027650e41731fc3c5b77448fdd2b9aceeda9cf95c499e7, ROOT);
+        privateBond.mint(0x1de409fb2319657514027650e41731fc3c5b77448fdd2b9aceeda9cf95c499e7);
+        bytes32 currentRoot = privateBond.buildMerkleRoot();
 
         bytes32[] memory inputsA = new bytes32[](4);
-        inputsA[0] = ROOT;
+        inputsA[0] = currentRoot;
         inputsA[1] = NULL_A;
         inputsA[2] = COMM_OUT_A;
         inputsA[3] = MATURITY;
 
         bytes32[] memory inputsB = new bytes32[](4);
-        inputsB[0] = ROOT;
+        inputsB[0] = currentRoot;
         inputsB[1] = NULL_B;
         inputsB[2] = COMM_OUT_B;
         inputsB[3] = MATURITY;
@@ -63,16 +65,17 @@ contract PrivateBondTest is Test {
     }
 
     function testPreventDoubleSpend() public {
-        privateBond.mint(0x1de409fb2319657514027650e41731fc3c5b77448fdd2b9aceeda9cf95c499e7, ROOT);
+        privateBond.mint(0x1de409fb2319657514027650e41731fc3c5b77448fdd2b9aceeda9cf95c499e7);
+        bytes32 currentRoot = privateBond.buildMerkleRoot();
 
         bytes32[] memory inputsA = new bytes32[](4);
-        inputsA[0] = ROOT;
+        inputsA[0] = currentRoot;
         inputsA[1] = NULL_A;
         inputsA[2] = COMM_OUT_A;
         inputsA[3] = MATURITY;
 
         bytes32[] memory inputsB = new bytes32[](4);
-        inputsB[0] = ROOT;
+        inputsB[0] = currentRoot;
         inputsB[1] = NULL_B;
         inputsB[2] = COMM_OUT_B;
         inputsB[3] = MATURITY;
@@ -83,17 +86,18 @@ contract PrivateBondTest is Test {
     }
 
     function testPreventPostMaturityTrade() public {
-        privateBond.mint(0x1de409fb2319657514027650e41731fc3c5b77448fdd2b9aceeda9cf95c499e7, ROOT);
+        privateBond.mint(0x1de409fb2319657514027650e41731fc3c5b77448fdd2b9aceeda9cf95c499e7);
+        bytes32 currentRoot = privateBond.buildMerkleRoot();
         vm.warp(1893456000 + 1 days);
 
         bytes32[] memory inputsA = new bytes32[](4);
-        inputsA[0] = ROOT;
+        inputsA[0] = currentRoot;
         inputsA[1] = NULL_A;
         inputsA[2] = COMM_OUT_A;
         inputsA[3] = MATURITY;
 
         bytes32[] memory inputsB = new bytes32[](4);
-        inputsB[0] = ROOT;
+        inputsB[0] = currentRoot;
         inputsB[1] = NULL_B;
         inputsB[2] = COMM_OUT_B;
         inputsB[3] = MATURITY;
@@ -103,34 +107,37 @@ contract PrivateBondTest is Test {
     }
 
     function testBurnAtMaturity() public {
-        privateBond.mint(0x1de409fb2319657514027650e41731fc3c5b77448fdd2b9aceeda9cf95c499e7, ROOT);
+        privateBond.mint(0x1de409fb2319657514027650e41731fc3c5b77448fdd2b9aceeda9cf95c499e7);
+        bytes32 currentRoot = privateBond.buildMerkleRoot();
         vm.warp(1893456000);
 
         bytes32[2] memory nullsIn = [NULL_A, NULL_B];
         bytes32[2] memory commsOut = [bytes32(0), bytes32(0)];
-        privateBond.burn("", ROOT, nullsIn, commsOut, MATURITY, bytes32(uint256(1)));
+        privateBond.burn("", currentRoot, nullsIn, commsOut, MATURITY, bytes32(uint256(1)));
         assertTrue(privateBond.nullifiers(NULL_A));
     }
 
     function testPreventEarlyRedemption() public {
-        privateBond.mint(0x1de409fb2319657514027650e41731fc3c5b77448fdd2b9aceeda9cf95c499e7, ROOT);
+        privateBond.mint(0x1de409fb2319657514027650e41731fc3c5b77448fdd2b9aceeda9cf95c499e7);
+        bytes32 currentRoot = privateBond.buildMerkleRoot();
         vm.warp(1893456000 - 365 days);
 
         bytes32[2] memory nullsIn = [NULL_A, NULL_B];
         bytes32[2] memory commsOut = [bytes32(0), bytes32(0)];
         vm.expectRevert("Bond not at maturity yet");
-        privateBond.burn("", ROOT, nullsIn, commsOut, MATURITY, bytes32(uint256(1)));
+        privateBond.burn("", currentRoot, nullsIn, commsOut, MATURITY, bytes32(uint256(1)));
     }
 
     function testPreventDoubleRedemption() public {
-        privateBond.mint(0x1de409fb2319657514027650e41731fc3c5b77448fdd2b9aceeda9cf95c499e7, ROOT);
+        privateBond.mint(0x1de409fb2319657514027650e41731fc3c5b77448fdd2b9aceeda9cf95c499e7);
+        bytes32 currentRoot = privateBond.buildMerkleRoot();
         vm.warp(1893456000);
 
         bytes32[2] memory nullsIn = [NULL_A, NULL_B];
         bytes32[2] memory commsOut = [bytes32(0), bytes32(0)];
-        privateBond.burn("", ROOT, nullsIn, commsOut, MATURITY, bytes32(uint256(1)));
+        privateBond.burn("", currentRoot, nullsIn, commsOut, MATURITY, bytes32(uint256(1)));
         vm.expectRevert("Note 0 already spent");
-        privateBond.burn("", ROOT, nullsIn, commsOut, MATURITY, bytes32(uint256(1)));
+        privateBond.burn("", currentRoot, nullsIn, commsOut, MATURITY, bytes32(uint256(1)));
     }
 
     function testInvalidRoot() public {
@@ -142,13 +149,14 @@ contract PrivateBondTest is Test {
     }
 
     function testInvalidRedemptionFlag() public {
-        privateBond.mint(0x1de409fb2319657514027650e41731fc3c5b77448fdd2b9aceeda9cf95c499e7, ROOT);
+        privateBond.mint(0x1de409fb2319657514027650e41731fc3c5b77448fdd2b9aceeda9cf95c499e7);
+        bytes32 currentRoot = privateBond.buildMerkleRoot();
         vm.warp(1893456000);
 
         bytes32[2] memory nullsIn = [NULL_A, NULL_B];
         bytes32[2] memory commsOut = [bytes32(0), bytes32(0)];
         vm.expectRevert("Output notes must have 0 value for redemption");
-        privateBond.burn("", ROOT, nullsIn, commsOut, MATURITY, bytes32(uint256(0)));
+        privateBond.burn("", currentRoot, nullsIn, commsOut, MATURITY, bytes32(uint256(0)));
     }
 
     function testOnlyOwnerCanSwap() public {
@@ -161,16 +169,17 @@ contract PrivateBondTest is Test {
     }
 
     function testIdenticalNullifiers() public {
-        privateBond.mint(0x1de409fb2319657514027650e41731fc3c5b77448fdd2b9aceeda9cf95c499e7, ROOT);
+        privateBond.mint(0x1de409fb2319657514027650e41731fc3c5b77448fdd2b9aceeda9cf95c499e7);
+        bytes32 currentRoot = privateBond.buildMerkleRoot();
 
         bytes32[] memory inputsA = new bytes32[](4);
-        inputsA[0] = ROOT;
+        inputsA[0] = currentRoot;
         inputsA[1] = NULL_A;
         inputsA[2] = COMM_OUT_A;
         inputsA[3] = MATURITY;
 
         bytes32[] memory inputsB = new bytes32[](4);
-        inputsB[0] = ROOT;
+        inputsB[0] = currentRoot;
         inputsB[1] = NULL_A;
         inputsB[2] = COMM_OUT_B;
         inputsB[3] = MATURITY;
