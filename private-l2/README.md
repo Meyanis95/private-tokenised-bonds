@@ -6,11 +6,11 @@ A zero-coupon bond protocol deployed on Aztec Network for native privacy. Transa
 
 This is a proof-of-concept implementation of a privacy-preserving bond protocol on Aztec L2. Bondholders can trade and redeem bonds without revealing transaction amounts to the blockchain—amounts are encrypted in private notes.
 
-### Key features:
+### Key Features
 
 - Zero-coupon bonds with maturity enforcement
 - Native Aztec privacy (notes, nullifiers, encrypted state)
-- Private peer-to-peer trading
+- Private peer-to-peer trading with atomic DvP support
 - Redemption at maturity
 - All amounts private; whitelist entries visible for KYC/AML compliance
 
@@ -20,7 +20,7 @@ This is a proof-of-concept implementation of a privacy-preserving bond protocol 
 
 Aztec smart contract implementing the bond protocol.
 
-- `src/main.nr` — Main contract
+- `src/main.nr` — Main contract (Noir)
 
 #### `/SPEC.md`
 
@@ -214,12 +214,39 @@ The sandbox provides pre-funded test accounts:
 | `test1` | Investor A | Institutional investor      |
 | `test2` | Investor B | Institutional investor      |
 
+## PoC Implementation Notes
+
+This repository is a proof-of-concept. The following simplifications were made:
+
+| Spec Feature                          | PoC Implementation                      | Rationale                                |
+| ------------------------------------- | --------------------------------------- | ---------------------------------------- |
+| Atomic DvP with stablecoin            | Simple `transfer_private` + off-chain   | No stablecoin contract on Aztec testnet  |
+| Atomic redemption (bond ↔ stablecoin) | Simple `redeem` burn + off-chain fiat   | No stablecoin contract on Aztec testnet  |
+| Bond attributes (ISIN/Asset ID)       | Single asset type assumed               | Simplifies contract for PoC              |
+| Key rotation support                  | Not implemented                         | Aztec account abstraction handles keys   |
+| Per-note selective disclosure         | Per-contract viewing keys (app-siloed)  | Native Aztec granularity; per-note needs custom ECDH |
+| Merkle whitelist for privacy          | Public `Map<address, bool>`             | Simpler, acceptable for regulated context|
+
 ### Known Limitations
 
 - **No stablecoin integration**: Redemption burns bonds; fiat settlement happens off-chain
-- **Public whitelist**: Participants are linkable (acceptable for KYC compliance)
+- **Public whitelist**: Participants are linkable via whitelist reads (acceptable for KYC compliance)
 - **Single bond type**: No multi-tranche or multi-maturity support
+- **Viewing key scope**: App-siloed (per-contract) granularity; per-note disclosure requires custom implementation
 - **Testnet only**: Not audited for production use
+
+### What Aztec Provides (vs Custom UTXO)
+
+This approach significantly reduces implementation complexity compared to the custom-private-utxo PoC:
+
+| Component               | Custom UTXO           | Aztec L2              |
+| ----------------------- | --------------------- | --------------------- |
+| Note encryption         | Manual implementation | Protocol-native       |
+| Nullifier management    | Manual implementation | Protocol-native       |
+| Merkle tree             | Manual implementation | Protocol-native       |
+| ZK circuit              | Manual Noir circuit   | Built into BalanceSet |
+| Proof generation        | Manual bb CLI         | PXE handles it        |
+| Double-spend prevention | Contract logic        | Protocol-native       |
 
 ## License
 
